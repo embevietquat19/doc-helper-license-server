@@ -95,7 +95,7 @@ v1.5.0 rồi đưa cho khách. Extension gọi `POST {URL}/api/verify`.
 ```bash
 # 1. Server sống
 curl https://license.digimar.site/
-# → {"ok":true,"service":"doc-helper-license","version":"1.1.0"}
+# → {"ok":true,"service":"doc-helper-license","version":"1.2.0"}
 
 # 2. Tạo key từ dòng lệnh trên máy chủ (SSH hoặc terminal hPanel)
 node scripts/admin.js create --days 30 --note "key test" --max-devices 2

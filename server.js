@@ -1,20 +1,23 @@
-// Doc Helper License Server 1.1.0 — server.js
+// Doc Helper License Server 1.2.0 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
 // 1.1.0: license gắn EMAIL khách thay vì key rời — verify nhận {email}
 // hoặc {key}; tạo license nhận email (trùng email đang còn thì 409).
+// 1.2.0: license KHÔNG GIỚI HẠN (days = 0 → không hết hạn, maxDevices = 0
+// → không giới hạn thiết bị); /api/verify trả thêm hạn mức còn lại
+// (daysRemaining, deviceCount, maxDevices, unlimitedTime, unlimitedDevices).
 'use strict';
 const crypto = require('node:crypto');
 const express = require('express');
 const path = require('node:path');
 const db = require('./src/db');
-const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense } = require('./src/keys');
+const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices } = require('./src/keys');
 
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -134,10 +137,18 @@ app.post('/api/verify', verifyRateLimit, (req, res) => {
       expiresAt: lic.expiresAt, deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
     });
   }
+  // Hạn mức còn lại: daysRemaining null = không giới hạn thời gian;
+  // maxDevices 0 = không giới hạn thiết bị. expiresAt trả null khi không
+  // giới hạn (bên trong DB lưu mốc 31/12/9999).
+  const unlimitedTime = isUnlimitedExpiry(lic.expiresAt);
+  const unlimitedDevices = isUnlimitedDevices(lic.maxDevices);
   return res.json({
     ok: true, valid: true, type,
-    expiresAt: lic.expiresAt,
-    expiresAtISO: new Date(lic.expiresAt).toISOString(),
+    expiresAt: unlimitedTime ? null : lic.expiresAt,
+    expiresAtISO: unlimitedTime ? null : new Date(lic.expiresAt).toISOString(),
+    daysRemaining: daysRemaining(lic.expiresAt),
+    unlimitedTime,
+    unlimitedDevices,
     deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
   });
 });
@@ -182,10 +193,12 @@ app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : '';
   const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
   const opts = {
-    days: Number.isFinite(days) && days >= 1 && days <= 3650 ? Math.floor(days) : 30,
-    maxDevices: Number.isFinite(maxDevices) && maxDevices >= 1 && maxDevices <= 20 ? Math.floor(maxDevices) : 2,
+    days: Number.isFinite(days) && days >= 0 && days <= 3650 ? Math.floor(days) : 30,
+    maxDevices: Number.isFinite(maxDevices) && maxDevices >= 0 && maxDevices <= 20 ? Math.floor(maxDevices) : 2,
     note
   };
+  // days = 0 → không giới hạn thời gian; maxDevices = 0 → không giới hạn
+  // thiết bị.
   // Tạo theo email: khách không nhận key — chỉ kích hoạt email đó.
   // Email đã có license thì báo 409 kèm bản hiện có (xóa bản cũ rồi tạo
   // lại, hoặc khóa/mở lại bản cũ).
