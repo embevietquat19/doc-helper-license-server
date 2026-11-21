@@ -28,8 +28,8 @@ check('generateKey: 2 key sinh ra khác nhau', generateKey() !== k1);
 check('generateKey: không chứa I/L/O (tránh nhầm khi gõ)', !/[ILO]/.test(k1.replace('TLV-', '')));
 check('normalizeKey: key sinh ra chuẩn hoá lại ra chính nó', normalizeKey(k1) === k1);
 check('normalizeKey: chữ L trong TLV không đổi thành 1 (hồi quy)',
-  normalizeKey('TLV-20NX-CKEN-GJAD-T1FX') === 'TLV-20NX-CKEN-GJAD-T1FX');
-check('normalizeKey: O/I/L trong thân → 0/1/1', normalizeKey('TLV-2ONX-CKEN-GJAD-TIFX') === 'TLV-20NX-CKEN-GJAD-T1FX');
+  normalizeKey('TLV-AAAA-AAAA-AAAA-AAAA') === 'TLV-AAAA-AAAA-AAAA-AAAA');
+check('normalizeKey: O/I/L trong thân → 0/1/1', normalizeKey('TLV-2OAA-AAIA-AAAA-AAAA') === 'TLV-20AA-AA1A-AAAA-AAAA');
 check('isValidKeyFormat', isValidKeyFormat(k1) && !isValidKeyFormat('hello'));
 check('hashKey: cùng key → cùng hash, khác key → khác hash',
   hashKey(k1) === hashKey(k1) && hashKey(k1) !== hashKey(generateKey()));
