@@ -16,6 +16,10 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const app = express();
 app.use(express.json({ limit: '64kb' }));
 app.disable('x-powered-by');
+// Hostinger chạy app sau 1 reverse proxy: tin proxy để req.ip là IP thật
+// của khách (không có dòng này, mọi request đều mang IP của proxy và
+// rate-limit /api/verify sẽ đếm chung 1 giỏ cho tất cả mọi người).
+app.set('trust proxy', 1);
 
 // ---------- Phiên quản trị (token ngẫu nhiên trong cookie httpOnly) ----------
 const adminTokens = new Map(); // token -> expiresAt (ms)
