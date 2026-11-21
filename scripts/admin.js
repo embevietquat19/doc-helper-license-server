@@ -34,7 +34,9 @@ if (cmd === 'create') {
     });
     console.log('Đã kích hoạt email (khách nhập email này trong extension là tải được):');
     console.log(lic.email);
-    console.log(`ID: ${saved.id} | Hết hạn: ${fmtDate(saved.expiresAt)} | Thiết bị tối đa: ${saved.maxDevices} | Ghi chú: ${saved.note || '(trống)'}`);
+    const expiry = lic.expiresAt >= 253402300799999 ? 'không giới hạn' : fmtDate(lic.expiresAt);
+    const devices = lic.maxDevices === 0 ? 'không giới hạn' : lic.maxDevices;
+    console.log(`ID: ${saved.id} | Hết hạn: ${expiry} | Thiết bị tối đa: ${devices} | Ghi chú: ${saved.note || '(trống)'}`);
     process.exit(0);
   }
   const lic = makeLicense({ days, maxDevices, note });
@@ -44,14 +46,18 @@ if (cmd === 'create') {
   });
   console.log('Key mới (chỉ hiện 1 lần — copy gửi khách ngay):');
   console.log(lic.key);
-  console.log(`ID: ${saved.id} | Hết hạn: ${fmtDate(saved.expiresAt)} | Thiết bị tối đa: ${saved.maxDevices} | Ghi chú: ${saved.note || '(trống)'}`);
+  const expiry = lic.expiresAt >= 253402300799999 ? 'không giới hạn' : fmtDate(lic.expiresAt);
+  const devices = lic.maxDevices === 0 ? 'không giới hạn' : lic.maxDevices;
+  console.log(`ID: ${saved.id} | Hết hạn: ${expiry} | Thiết bị tối đa: ${devices} | Ghi chú: ${saved.note || '(trống)'}`);
 } else if (cmd === 'list') {
   const list = db.listLicenses();
   if (!list.length) { console.log('Chưa có key nào.'); process.exit(0); }
   for (const l of list) {
     const status = l.revoked ? 'BỊ KHÓA' : (l.expiresAt <= Date.now() ? 'HẾT HẠN' : 'CÒN HẠN');
     const ident = l.email ? l.email : `${l.prefix}…`;
-    console.log(`#${l.id} ${ident} | ${status} | hết hạn ${fmtDate(l.expiresAt)} | thiết bị ${l.deviceCount}/${l.maxDevices} | ${l.note || '(không ghi chú)'}`);
+    const expiry = l.expiresAt >= 253402300799999 ? 'không giới hạn' : fmtDate(l.expiresAt);
+    const devices = l.maxDevices === 0 ? `${l.deviceCount} · không giới hạn` : `${l.deviceCount}/${l.maxDevices}`;
+    console.log(`#${l.id} ${ident} | ${status} | hết hạn ${expiry} | thiết bị ${devices} | ${l.note || '(không ghi chú)'}`);
   }
 } else if (cmd === 'stats') {
   console.log(db.stats());
@@ -64,5 +70,6 @@ if (cmd === 'create') {
   console.log('Dùng: node scripts/admin.js <create|list|stats|revoke|restore|delete> [tuỳ chọn]');
   console.log('  create --days 30 --note "Khách A" --max-devices 2');
   console.log('  create --days 30 --email khach@gmail.com --note "Khách A"');
+  console.log('  create --days 0 --max-devices 0 --email khach@gmail.com  (không giới hạn thời gian + thiết bị)');
   process.exit(1);
 }
