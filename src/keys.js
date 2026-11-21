@@ -1,0 +1,63 @@
+// Doc Helper License Server 1.0.0 — src/keys.js
+// Định dạng key: TLV-XXXX-XXXX-XXXX-XXXX (16 ký tự, Crockford base32,
+// bỏ 0/O/1/I/L để tránh nhầm khi gõ tay). 16 ký tự = 80 bit — không đoán
+// nổi, kể cả khi kẻ xấu thử hàng triệu lần (có rate-limit ở /verify).
+'use strict';
+const crypto = require('node:crypto');
+
+const ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789'; // Crockford base32, không 0/O/1/I/L
+const KEY_RE = /^TLV-([A-Z0-9]{4})-([A-Z0-9]{4})-([A-Z0-9]{4})-([A-Z0-9]{4})$/;
+
+function generateKey() {
+  const bytes = crypto.randomBytes(10); // 80 bit
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += ALPHABET[(value >> bits) & 31];
+    }
+  }
+  if (bits > 0) out += ALPHABET[(value << (5 - bits)) & 31];
+  return `TLV-${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8, 12)}-${out.slice(12, 16)}`;
+}
+
+// Chuẩn hoá key người dùng nhập: bỏ khoảng trắng/gạch, viết hoa, thêm dấu -.
+// Lưu ý: chỉ sửa O/I/L trong PHẦN THÂN key (TLV là tiền tố cố định, chữ L
+// trong đó không được đổi thành 1).
+function normalizeKey(raw) {
+  if (typeof raw !== 'string') return '';
+  let clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (clean.startsWith('TLV')) clean = clean.slice(3);
+  const body = clean.replace(/O/g, '0').replace(/I/g, '1').replace(/L/g, '1');
+  if (body.length !== 16) return '';
+  return `TLV-${body.slice(0, 4)}-${body.slice(4, 8)}-${body.slice(8, 12)}-${body.slice(12, 16)}`;
+}
+
+function isValidKeyFormat(raw) {
+  return KEY_RE.test(normalizeKey(raw));
+}
+
+function hashKey(normalizedKey) {
+  return crypto.createHash('sha256').update(normalizedKey, 'utf8').digest('hex');
+}
+
+// Tạo key mới: { key (hiển thị 1 lần duy nhất), prefix, expiresAt }.
+// days: số ngày dùng được (mặc định 30). Trả về cả ngày hết hạn ISO.
+function makeLicense({ days = 30, note = '', maxDevices = 2 } = {}) {
+  const key = generateKey();
+  const expiresAt = Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
+  return {
+    key,
+    keyHash: hashKey(key),
+    prefix: key.slice(0, 8), // "TLV-XXXX" — để nhận diện key trong danh sách
+    note,
+    expiresAt,
+    maxDevices
+  };
+}
+
+module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense };
