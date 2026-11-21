@@ -85,6 +85,8 @@
       <label class="check"><input type="checkbox" id="unlimitedDevices"> Không giới hạn thiết bị</label>
       <label for="email">Email khách — nhập email để kích hoạt theo email (khách nhập email này trong extension là tải được, không cần cấp key). Để trống để tạo key rời thay vì email.</label>
       <input id="email" type="email" maxlength="254" placeholder="vidu@gmail.com">
+      <label for="zalo">Số Zalo khách (không bắt buộc — để liên hệ / nhắc gia hạn)</label>
+      <input id="zalo" type="tel" maxlength="20" placeholder="09xxxxxxxx">
       <label for="note">Ghi chú (tên khách, đơn hàng…)</label>
       <input id="note" type="text" maxlength="200" placeholder="Ví dụ: Khách Nguyễn Văn A — 30 ngày">
       <button class="primary" id="createBtn">Tạo key / Kích hoạt email</button>
@@ -97,6 +99,31 @@
         <div>Đã kích hoạt email: <code id="newEmail"></code></div>
         <p>✅ Khách nhập email này trong popup extension rồi bấm Kích hoạt là tải được — không cần gửi key.</p>
       </div>
+    </div>
+
+    <div class="card" id="editCard" style="display:none">
+      <h2>Sửa thông tin khách — <span id="editIdent"></span></h2>
+      <label for="editZalo">Số Zalo khách</label>
+      <input id="editZalo" type="tel" maxlength="20" placeholder="09xxxxxxxx">
+      <label for="editNote">Ghi chú</label>
+      <input id="editNote" type="text" maxlength="200">
+      <div class="row">
+        <div>
+          <label for="editExpiry">Hết hạn ngày</label>
+          <input id="editExpiry" type="date">
+        </div>
+        <div>
+          <label for="editMaxDevices">Số thiết bị tối đa (0 = không giới hạn)</label>
+          <input id="editMaxDevices" type="number" min="0" max="20" value="2">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="editUnlimitedTime"> Không giới hạn thời gian (dùng mãi mãi)</label>
+      <div class="row">
+        <div><button class="primary" id="editSaveBtn">Lưu thay đổi</button></div>
+        <div><button class="primary" id="editCancelBtn" style="background:#64748b">Hủy</button></div>
+      </div>
+      <div class="err" id="editErr"></div>
+      <p class="muted" id="editOk" style="display:none;color:#065f46">✅ Đã lưu.</p>
     </div>
 
     <div class="card">
@@ -142,6 +169,8 @@ async function loadAll() {
   if (list.ok) renderList(list.licenses);
 }
 
+let currentLicenses = [];
+
 function statusBadge(l) {
   const now = Date.now();
   if (l.revoked) return '<span class="badge bad">Bị khóa</span>';
@@ -150,8 +179,9 @@ function statusBadge(l) {
 }
 
 function renderList(licenses) {
+  currentLicenses = licenses;
   if (!licenses.length) { $('list').innerHTML = '<p class="muted">Chưa có key nào.</p>'; return; }
-  let html = '<table><thead><tr><th>Email / Key</th><th>Ghi chú</th><th>Hết hạn</th><th>Thiết bị</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Email / Key</th><th>Zalo</th><th>Ghi chú</th><th>Hết hạn</th><th>Thiết bị</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
   for (const l of licenses) {
     const ident = l.email
       ? escapeHtml(l.email)
@@ -160,11 +190,13 @@ function renderList(licenses) {
     const devices = l.maxDevices === 0 ? `${l.deviceCount} · không giới hạn` : `${l.deviceCount} / ${l.maxDevices}`;
     html += `<tr>
       <td>${ident}<br><span class="muted">#${l.id} · tạo ${fmtDate(l.createdAt)}</span></td>
+      <td>${escapeHtml(l.zalo || '')}</td>
       <td>${escapeHtml(l.note || '')}</td>
       <td>${expiry}</td>
       <td>${devices}</td>
       <td>${statusBadge(l)}</td>
       <td>
+        <button class="act" data-act="edit" data-id="${l.id}">Sửa</button>
         ${l.revoked
           ? `<button class="act" data-act="restore" data-id="${l.id}">Mở lại</button>`
           : `<button class="act danger" data-act="revoke" data-id="${l.id}">Khóa</button>`}
@@ -177,6 +209,7 @@ function renderList(licenses) {
   $('list').querySelectorAll('button[data-act]').forEach((b) => {
     b.addEventListener('click', async () => {
       const id = b.dataset.id, act = b.dataset.act;
+      if (act === 'edit') { startEdit(Number(id)); return; }
       if (act === 'delete' && !confirm('Xóa hẳn key này? Khách đang dùng sẽ dừng ngay.')) return;
       if (act === 'revoke' && !confirm('Khóa key này? Khách đang dùng sẽ dừng ngay.')) return;
       if (act === 'delete') await api(`/api/admin/licenses/${id}`, { method: 'DELETE' });
@@ -186,6 +219,73 @@ function renderList(licenses) {
     });
   });
 }
+
+// Ngày (giờ địa phương) dạng YYYY-MM-DD để điền vào ô <input type="date">.
+function toDateInput(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+let editingId = null;
+function startEdit(id) {
+  const l = currentLicenses.find((x) => x.id === id);
+  if (!l) return;
+  editingId = id;
+  $('editIdent').textContent = l.email || (l.prefix + '…');
+  $('editZalo').value = l.zalo || '';
+  $('editNote').value = l.note || '';
+  $('editMaxDevices').value = l.maxDevices;
+  const unlimited = l.expiresAt >= 253402300799999;
+  $('editUnlimitedTime').checked = unlimited;
+  $('editExpiry').disabled = unlimited;
+  $('editExpiry').value = unlimited ? '' : toDateInput(l.expiresAt);
+  $('editErr').style.display = 'none';
+  $('editOk').style.display = 'none';
+  $('editCard').style.display = '';
+  $('editCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function cancelEdit() {
+  editingId = null;
+  $('editCard').style.display = 'none';
+}
+
+$('editUnlimitedTime').addEventListener('change', () => { $('editExpiry').disabled = $('editUnlimitedTime').checked; });
+$('editCancelBtn').addEventListener('click', cancelEdit);
+$('editSaveBtn').addEventListener('click', async () => {
+  if (!editingId) return;
+  const btn = $('editSaveBtn');
+  btn.disabled = true;
+  $('editErr').style.display = 'none';
+  $('editOk').style.display = 'none';
+  try {
+    const body = {
+      zalo: $('editZalo').value.trim(),
+      note: $('editNote').value.trim(),
+      maxDevices: Number($('editMaxDevices').value)
+    };
+    if ($('editUnlimitedTime').checked) body.unlimitedTime = true;
+    else if ($('editExpiry').value) body.expiresAtISO = $('editExpiry').value;
+    const data = await api(`/api/admin/licenses/${editingId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    });
+    if (!data.ok) {
+      const errEl = $('editErr');
+      errEl.textContent = data.error === 'bad_zalo' ? 'Số Zalo không đúng (9–15 chữ số).'
+        : data.error === 'bad_max_devices' ? 'Số thiết bị tối đa phải từ 0 đến 20.'
+        : data.error === 'bad_expiry' ? 'Ngày hết hạn không hợp lệ.'
+        : data.error === 'not_found' ? 'Không tìm thấy key này nữa.'
+        : 'Lưu thất bại, thử lại.';
+      errEl.style.display = '';
+      return;
+    }
+    $('editOk').style.display = '';
+    loadAll();
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -224,7 +324,8 @@ $('createBtn').addEventListener('click', async () => {
         days: $('unlimitedTime').checked ? 0 : Number($('days').value),
         maxDevices: $('unlimitedDevices').checked ? 0 : Number($('maxDevices').value),
         note: $('note').value.trim(),
-        email: $('email').value.trim()
+        email: $('email').value.trim(),
+        zalo: $('zalo').value.trim()
       })
     });
     const data = await r.json().catch(() => ({}));
@@ -235,7 +336,9 @@ $('createBtn').addEventListener('click', async () => {
         ? 'Email này đã có license rồi (xem danh sách bên dưới — xóa bản cũ hoặc khóa/mở lại bản cũ).'
         : data.error === 'bad_email'
           ? 'Email không đúng định dạng.'
-          : 'Tạo thất bại, thử lại.';
+          : data.error === 'bad_zalo'
+            ? 'Số Zalo không đúng (9–15 chữ số).'
+            : 'Tạo thất bại, thử lại.';
       errEl.style.display = '';
       return;
     }
@@ -248,6 +351,7 @@ $('createBtn').addEventListener('click', async () => {
       $('newKeyBox').style.display = '';
     }
     $('note').value = '';
+    $('zalo').value = '';
     loadAll();
   } finally {
     btn.disabled = false;
