@@ -68,7 +68,7 @@
     </div>
 
     <div class="card">
-      <h2>Tạo key mới</h2>
+      <h2>Tạo key mới / Kích hoạt email</h2>
       <div class="row">
         <div>
           <label for="days">Số ngày dùng được</label>
@@ -79,12 +79,19 @@
           <input id="maxDevices" type="number" min="1" max="20" value="2">
         </div>
       </div>
+      <label for="email">Email khách — nhập email để kích hoạt theo email (khách nhập email này trong extension là tải được, không cần cấp key). Để trống để tạo key rời thay vì email.</label>
+      <input id="email" type="email" maxlength="254" placeholder="vidu@gmail.com">
       <label for="note">Ghi chú (tên khách, đơn hàng…)</label>
       <input id="note" type="text" maxlength="200" placeholder="Ví dụ: Khách Nguyễn Văn A — 30 ngày">
-      <button class="primary" id="createBtn">Tạo key</button>
+      <button class="primary" id="createBtn">Tạo key / Kích hoạt email</button>
+      <div class="err" id="createErr"></div>
       <div class="newkey" id="newKeyBox">
         <div>Key mới: <code id="newKey"></code></div>
         <p>⚠️ Key chỉ hiện 1 lần này — copy gửi cho khách ngay. Server không lưu key gốc nên không xem lại được.</p>
+      </div>
+      <div class="newkey" id="newEmailBox">
+        <div>Đã kích hoạt email: <code id="newEmail"></code></div>
+        <p>✅ Khách nhập email này trong popup extension rồi bấm Kích hoạt là tải được — không cần gửi key.</p>
       </div>
     </div>
 
@@ -140,10 +147,13 @@ function statusBadge(l) {
 
 function renderList(licenses) {
   if (!licenses.length) { $('list').innerHTML = '<p class="muted">Chưa có key nào.</p>'; return; }
-  let html = '<table><thead><tr><th>Key</th><th>Ghi chú</th><th>Hết hạn</th><th>Thiết bị</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Email / Key</th><th>Ghi chú</th><th>Hết hạn</th><th>Thiết bị</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
   for (const l of licenses) {
+    const ident = l.email
+      ? escapeHtml(l.email)
+      : `<code>${l.prefix}…</code>`;
     html += `<tr>
-      <td><code>${l.prefix}…</code><br><span class="muted">#${l.id} · tạo ${fmtDate(l.createdAt)}</span></td>
+      <td>${ident}<br><span class="muted">#${l.id} · tạo ${fmtDate(l.createdAt)}</span></td>
       <td>${escapeHtml(l.note || '')}</td>
       <td>${fmtDate(l.expiresAt)}</td>
       <td>${l.deviceCount} / ${l.maxDevices}</td>
@@ -197,21 +207,42 @@ $('logoutBtn').addEventListener('click', async () => {
 $('createBtn').addEventListener('click', async () => {
   const btn = $('createBtn');
   btn.disabled = true;
+  $('createErr').style.display = 'none';
+  $('newKeyBox').style.display = 'none';
+  $('newEmailBox').style.display = 'none';
   try {
-    const data = await api('/api/admin/licenses', {
+    const r = await fetch('/api/admin/licenses', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         days: Number($('days').value),
         maxDevices: Number($('maxDevices').value),
-        note: $('note').value.trim()
+        note: $('note').value.trim(),
+        email: $('email').value.trim()
       })
     });
-    if (data.ok) {
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 401) { showLogin(); return; }
+    if (!data.ok) {
+      const errEl = $('createErr');
+      errEl.textContent = data.error === 'email_exists'
+        ? 'Email này đã có license rồi (xem danh sách bên dưới — xóa bản cũ hoặc khóa/mở lại bản cũ).'
+        : data.error === 'bad_email'
+          ? 'Email không đúng định dạng.'
+          : 'Tạo thất bại, thử lại.';
+      errEl.style.display = '';
+      return;
+    }
+    if (data.email) {
+      $('newEmail').textContent = data.email;
+      $('newEmailBox').style.display = '';
+      $('email').value = '';
+    } else if (data.key) {
       $('newKey').textContent = data.key;
       $('newKeyBox').style.display = '';
-      $('note').value = '';
-      loadAll();
     }
+    $('note').value = '';
+    loadAll();
   } finally {
     btn.disabled = false;
   }
