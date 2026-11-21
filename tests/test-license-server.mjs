@@ -1,6 +1,7 @@
-// License Server 1.0.0 — tests/test-license-server.mjs
-// Kiểm chứng src/keys.js (sinh + chuẩn hoá key) và src/db.js (lưu key dạng
-// hash, đếm thiết bị, khóa key). Dùng DATA_DIR tạm — không chạm DB thật.
+// License Server 1.1.0 — tests/test-license-server.mjs
+// Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email) và src/db.js (lưu
+// key dạng hash, license theo email, đếm thiết bị, khóa key). Dùng DATA_DIR
+// tạm — không chạm DB thật.
 // Chạy: DATA_DIR=/tmp/license-test-db node tests/test-license-server.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,7 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-test-'));
 process.env.DATA_DIR = tmpDir;
 
-const { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense } = (await import('../src/keys.js')).default;
+const { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense } = (await import('../src/keys.js')).default;
 const db = (await import('../src/db.js')).default;
 
 let pass = 0, fail = 0;
@@ -39,6 +40,20 @@ check('hashKey: 64 ký tự hex', /^[0-9a-f]{64}$/.test(hashKey(k1)));
   check('makeLicense: key hợp lệ + hết hạn sau ~30 ngày',
     isValidKeyFormat(lic.key) && Math.abs(lic.expiresAt - (Date.now() + 30 * 24 * 60 * 60 * 1000)) < 60 * 1000);
   check('makeLicense: prefix là 8 ký tự đầu của key', lic.prefix === lic.key.slice(0, 8));
+}
+
+// ---------- keys.js — email ----------
+check('normalizeEmail: cắt khoảng trắng + viết thường', normalizeEmail('  Khach@Gmail.COM ') === 'khach@gmail.com');
+check('normalizeEmail: không phải chuỗi → rỗng', normalizeEmail(null) === '' && normalizeEmail(123) === '');
+check('isValidEmail: đúng/sai', isValidEmail('khach@gmail.com') && isValidEmail('a.b+tag@sub.example.vn')
+  && !isValidEmail('khong-phai-email') && !isValidEmail('thieu@domain') && !isValidEmail('') && !isValidEmail('a@b.c'));
+{
+  const lic = makeEmailLicense({ days: 90, note: 'khách email', maxDevices: 2, email: '  Khach@Gmail.COM ' });
+  check('makeEmailLicense: email chuẩn hoá thường + prefix EMAIL + hết hạn ~90 ngày',
+    lic.email === 'khach@gmail.com' && lic.prefix === 'EMAIL'
+    && Math.abs(lic.expiresAt - (Date.now() + 90 * 24 * 60 * 60 * 1000)) < 60 * 1000);
+  check('makeEmailLicense: key_hash là hash 64 hex (key gốc đã bỏ đi)',
+    /^[0-9a-f]{64}$/.test(lic.keyHash));
 }
 
 // ---------- db.js ----------
@@ -72,6 +87,36 @@ check('db.revokeLicense: khóa key → tìm lại thấy revoked', db.revokeLice
 check('db.revokeLicense: mở lại key → hết revoked', db.revokeLicense(saved.id, false) && db.findLicenseByHash(lic.keyHash).revoked === false);
 check('db.deleteLicense: xóa key → không tìm thấy nữa', db.deleteLicense(saved.id) && db.findLicenseByHash(lic.keyHash) === null);
 check('db.stats sau xóa: total 0', db.stats().total === 0);
+
+// ---------- db.js — license theo email ----------
+{
+  const eLic = makeEmailLicense({ days: 30, note: 'khách email test', maxDevices: 2, email: 'Khach@Gmail.COM' });
+  const eSaved = db.createLicense({
+    keyHash: eLic.keyHash, prefix: eLic.prefix, note: eLic.note,
+    expiresAt: eLic.expiresAt, maxDevices: eLic.maxDevices, email: eLic.email
+  });
+  check('db.createLicense (email): lưu được, email đã chuẩn hoá thường', eSaved && eSaved.id > 0 && eSaved.email === 'khach@gmail.com' && eSaved.prefix === 'EMAIL');
+  check('db.findLicenseByEmail: tìm được email đã chuẩn hoá',
+    db.findLicenseByEmail('khach@gmail.com')?.id === eSaved.id);
+  check('db.findLicenseByEmail: email lạ → null', db.findLicenseByEmail('ai-do@khac.vn') === null);
+  {
+    const t1 = db.touchDeviceByLicenseId(eSaved.id, 'device-A');
+    check('db.touchDeviceByLicenseId: thiết bị 1 OK, đếm 1', t1.ok && t1.deviceCount === 1);
+    const t2 = db.touchDeviceByLicenseId(eSaved.id, 'device-B');
+    check('db.touchDeviceByLicenseId: thiết bị 2 OK, đếm 2', t2.ok && t2.deviceCount === 2);
+    const t3 = db.touchDeviceByLicenseId(eSaved.id, 'device-C');
+    check('db.touchDeviceByLicenseId: thiết bị 3 vượt giới hạn → chặn', !t3.ok && t3.reason === 'device_limit');
+    const tBad = db.touchDeviceByLicenseId(99999, 'device-A');
+    check('db.touchDeviceByLicenseId: id lạ → not_found', !tBad.ok && tBad.reason === 'not_found');
+  }
+  {
+    const list = db.listLicenses();
+    check('db.listLicenses: license email có email trong danh sách', list.length === 1 && list[0].email === 'khach@gmail.com' && list[0].deviceCount === 2);
+  }
+  check('db.revokeLicense (email): khóa → tìm lại thấy revoked', db.revokeLicense(eSaved.id, true) && db.findLicenseByEmail('khach@gmail.com').revoked === true);
+  check('db.deleteLicense (email): xóa → không tìm thấy nữa', db.deleteLicense(eSaved.id) && db.findLicenseByEmail('khach@gmail.com') === null);
+}
+check('db.stats cuối: total 0', db.stats().total === 0);
 
 // Dọn thư mục tạm.
 fs.rmSync(tmpDir, { recursive: true, force: true });
