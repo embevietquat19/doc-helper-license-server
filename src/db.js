@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.2.0 — src/db.js
+// Doc Helper License Server 1.3.0 — src/db.js
 // SQLite qua node:sqlite (có sẵn từ Node 22+, không cần gói native).
 // Lưu key dạng HASH SHA-256 (không lưu key gốc — lộ DB cũng không dùng được
 // key). Mỗi key: hạn dùng, trạng thái, số thiết bị tối đa, ghi chú.
@@ -9,6 +9,8 @@
 // Từ 1.2.0: license KHÔNG GIỚI HẠN — expires_at = 31/12/9999 (mốc
 // UNLIMITED_EXPIRES_AT trong keys.js) nghĩa là không hết hạn;
 // max_devices = 0 nghĩa là không giới hạn thiết bị (touchDevice luôn OK).
+// Từ 1.3.0: license có thêm SỐ ZALO khách (cột zalo) + sửa được thông tin
+// khách (updateLicense: zalo, ghi chú, hạn dùng, số thiết bị tối đa).
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -30,7 +32,8 @@ db.exec(`
     revoked INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     last_used_at INTEGER,
-    email TEXT DEFAULT ''
+    email TEXT DEFAULT '',
+    zalo TEXT DEFAULT ''
   );
   CREATE TABLE IF NOT EXISTS devices (
     key_hash TEXT NOT NULL,
@@ -43,6 +46,8 @@ db.exec(`
 `);
 // DB cũ (tạo trước 1.1.0) chưa có cột email — thêm vào, đã có thì bỏ qua.
 try { db.exec(`ALTER TABLE licenses ADD COLUMN email TEXT DEFAULT ''`); } catch (e) { /* cột đã có */ }
+// DB cũ (tạo trước 1.3.0) chưa có cột zalo — thêm vào, đã có thì bỏ qua.
+try { db.exec(`ALTER TABLE licenses ADD COLUMN zalo TEXT DEFAULT ''`); } catch (e) { /* cột đã có */ }
 
 function rowToLicense(r) {
   if (!r) return null;
@@ -50,6 +55,7 @@ function rowToLicense(r) {
     id: r.id,
     prefix: r.prefix,
     email: r.email || '',
+    zalo: r.zalo || '',
     note: r.note || '',
     expiresAt: r.expires_at,
     expiresAtISO: new Date(r.expires_at).toISOString(),
@@ -95,12 +101,32 @@ function touchDevice(keyHashOrId, deviceId, byId) {
 module.exports = {
   db,
   DB_PATH,
-  createLicense({ keyHash, prefix, note, expiresAt, maxDevices, email }) {
+  createLicense({ keyHash, prefix, note, expiresAt, maxDevices, email, zalo }) {
     const now = Date.now();
     const r = db.prepare(
-      'INSERT INTO licenses (key_hash, prefix, note, expires_at, max_devices, created_at, email) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    ).run(keyHash, prefix, note || '', expiresAt, maxDevices, now, email || '');
+      'INSERT INTO licenses (key_hash, prefix, note, expires_at, max_devices, created_at, email, zalo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(keyHash, prefix, note || '', expiresAt, maxDevices, now, email || '', zalo || '');
     return rowToLicense(db.prepare('SELECT * FROM licenses WHERE id = ?').get(r.lastInsertRowid));
+  },
+  // Sửa thông tin khách: chỉ cập nhật các trường có trong patch
+  // (zalo, note, expiresAt, maxDevices). Trả license đã sửa, hoặc null
+  // nếu không có license nào mang id đó. Patch rỗng → trả nguyên bản.
+  updateLicense(id, patch) {
+    const row = db.prepare('SELECT * FROM licenses WHERE id = ?').get(id);
+    if (!row) return null;
+    const fields = [];
+    const vals = [];
+    if (typeof patch.zalo === 'string') { fields.push('zalo = ?'); vals.push(patch.zalo); }
+    if (typeof patch.note === 'string') { fields.push('note = ?'); vals.push(patch.note); }
+    if (Number.isFinite(patch.expiresAt)) { fields.push('expires_at = ?'); vals.push(patch.expiresAt); }
+    if (Number.isFinite(patch.maxDevices)) { fields.push('max_devices = ?'); vals.push(patch.maxDevices); }
+    if (fields.length) {
+      vals.push(id);
+      db.prepare(`UPDATE licenses SET ${fields.join(', ')} WHERE id = ?`).run(...vals);
+    }
+    const lic = rowToLicense(db.prepare('SELECT * FROM licenses WHERE id = ?').get(id));
+    lic.deviceCount = db.prepare('SELECT COUNT(*) AS n FROM devices WHERE key_hash = ?').get(row.key_hash).n;
+    return lic;
   },
   findLicenseByHash(keyHash) {
     return rowToLicense(db.prepare('SELECT * FROM licenses WHERE key_hash = ?').get(keyHash));
