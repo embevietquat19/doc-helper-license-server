@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.2.0 — server.js
+// Doc Helper License Server 1.3.0 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
@@ -7,17 +7,21 @@
 // 1.2.0: license KHÔNG GIỚI HẠN (days = 0 → không hết hạn, maxDevices = 0
 // → không giới hạn thiết bị); /api/verify trả thêm hạn mức còn lại
 // (daysRemaining, deviceCount, maxDevices, unlimitedTime, unlimitedDevices).
+// 1.3.0: sửa được thông tin khách (PATCH /api/admin/licenses/:id — số
+// Zalo, ghi chú, hạn dùng, số thiết bị tối đa; lúc tạo cũng nhập được số
+// Zalo); đăng nhập quản trị có rate-limit (mặc định 10 lần / 10 phút / IP)
+// để mật khẩu yếu khó bị dò.
 'use strict';
 const crypto = require('node:crypto');
 const express = require('express');
 const path = require('node:path');
 const db = require('./src/db');
-const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices } = require('./src/keys');
+const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices, UNLIMITED_EXPIRES_AT } = require('./src/keys');
 
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -74,6 +78,24 @@ function sameOrigin(req, res, next) {
       }
     } catch { return res.status(403).json({ ok: false, error: 'bad_origin' }); }
   }
+  next();
+}
+
+// ---------- Rate-limit cho /api/admin/login: 10 lần / 10 phút / IP ----------
+// Đăng nhập quản trị trước đây không có giới hạn — mật khẩu yếu có thể bị
+// dò. Giới hạn chỉnh được qua biến môi trường (để test đặt nhỏ lại).
+const LOGIN_RATE_LIMIT_MAX = Number(process.env.LOGIN_RATE_LIMIT_MAX) || 10;
+const LOGIN_RATE_LIMIT_WINDOW_MS = Number(process.env.LOGIN_RATE_LIMIT_WINDOW_MS) || 10 * 60 * 1000;
+const loginHits = new Map(); // ip -> [timestamps]
+function loginRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const list = (loginHits.get(ip) || []).filter((t) => now - t < LOGIN_RATE_LIMIT_WINDOW_MS);
+  if (list.length >= LOGIN_RATE_LIMIT_MAX) {
+    return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: Math.ceil(LOGIN_RATE_LIMIT_WINDOW_MS / 1000) });
+  }
+  list.push(now);
+  loginHits.set(ip, list);
   next();
 }
 
@@ -159,7 +181,7 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.post('/api/admin/login', sameOrigin, (req, res) => {
+app.post('/api/admin/login', loginRateLimit, sameOrigin, (req, res) => {
   if (!ADMIN_PASSWORD) {
     return res.status(500).json({ ok: false, error: 'admin_password_not_configured' });
   }
@@ -192,6 +214,10 @@ app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
   const maxDevices = Number(req.body?.maxDevices);
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : '';
   const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  const zalo = sanitizeZalo(req.body?.zalo);
+  if (zalo === null) {
+    return res.status(400).json({ ok: false, error: 'bad_zalo' });
+  }
   const opts = {
     days: Number.isFinite(days) && days >= 0 && days <= 3650 ? Math.floor(days) : 30,
     maxDevices: Number.isFinite(maxDevices) && maxDevices >= 0 && maxDevices <= 20 ? Math.floor(maxDevices) : 2,
@@ -214,17 +240,67 @@ app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
     const lic = makeEmailLicense({ ...opts, email });
     const saved = db.createLicense({
       keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
-      expiresAt: lic.expiresAt, maxDevices: lic.maxDevices, email: lic.email
+      expiresAt: lic.expiresAt, maxDevices: lic.maxDevices, email: lic.email, zalo
     });
     return res.json({ ok: true, email: lic.email, license: saved });
   }
   const lic = makeLicense(opts);
   const saved = db.createLicense({
     keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
-    expiresAt: lic.expiresAt, maxDevices: lic.maxDevices
+    expiresAt: lic.expiresAt, maxDevices: lic.maxDevices, zalo
   });
   // Key gốc chỉ trả về 1 lần duy nhất lúc tạo — lưu lại ngay, không xem lại được.
   res.json({ ok: true, key: lic.key, license: saved });
+});
+
+// Số Zalo: chỉ nhận chuỗi số (cho phép + ở đầu, 9–15 số), rỗng = không có.
+// Trả số đã chuẩn hoá, hoặc null khi sai định dạng.
+function sanitizeZalo(v) {
+  if (v === undefined || v === null || v === '') return '';
+  if (typeof v !== 'string') return null;
+  const z = v.trim().replace(/[\s.]/g, '');
+  if (!/^\+?\d{9,15}$/.test(z)) return null;
+  return z;
+}
+
+// Sửa thông tin khách: PATCH /api/admin/licenses/:id
+// Body (chỉ gửi trường muốn đổi): { zalo, note, maxDevices,
+// expiresAtISO ('YYYY-MM-DD' — hết hạn cuối ngày đó, giờ VN),
+// unlimitedTime (true → không giới hạn), days (số ngày kể từ hôm nay,
+// 0 → không giới hạn) }.
+app.patch('/api/admin/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  const patch = {};
+  if (req.body?.zalo !== undefined) {
+    const z = sanitizeZalo(req.body.zalo);
+    if (z === null) return res.status(400).json({ ok: false, error: 'bad_zalo' });
+    patch.zalo = z;
+  }
+  if (typeof req.body?.note === 'string') patch.note = req.body.note.slice(0, 200);
+  if (req.body?.maxDevices !== undefined) {
+    const md = Number(req.body.maxDevices);
+    if (!Number.isFinite(md) || md < 0 || md > 20) {
+      return res.status(400).json({ ok: false, error: 'bad_max_devices' });
+    }
+    patch.maxDevices = Math.floor(md);
+  }
+  if (req.body?.unlimitedTime === true) {
+    patch.expiresAt = UNLIMITED_EXPIRES_AT;
+  } else if (typeof req.body?.expiresAtISO === 'string' && req.body.expiresAtISO) {
+    const ms = Date.parse(req.body.expiresAtISO + 'T23:59:59.999+07:00');
+    if (!Number.isFinite(ms)) return res.status(400).json({ ok: false, error: 'bad_expiry' });
+    patch.expiresAt = ms;
+  } else if (req.body?.days !== undefined) {
+    const d = Number(req.body.days);
+    if (!Number.isFinite(d) || d < 0 || d > 3650) {
+      return res.status(400).json({ ok: false, error: 'bad_days' });
+    }
+    patch.expiresAt = d === 0 ? UNLIMITED_EXPIRES_AT : Date.now() + Math.floor(d) * 24 * 60 * 60 * 1000;
+  }
+  const updated = db.updateLicense(id, patch);
+  if (!updated) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: true, license: updated });
 });
 
 app.post('/api/admin/licenses/:id/revoke', requireAdmin, sameOrigin, (req, res) => {
@@ -248,9 +324,15 @@ app.delete('/api/admin/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
   res.json({ ok });
 });
 
-app.listen(PORT, () => {
-  console.log(`[license-server] listening on :${PORT} (db: ${db.DB_PATH})`);
-  if (!ADMIN_PASSWORD) {
-    console.log('[license-server] WARNING: ADMIN_PASSWORD chưa đặt — /admin chưa đăng nhập được. Đặt biến môi trường ADMIN_PASSWORD.');
-  }
-});
+// Chỉ lắng nghe khi chạy trực tiếp (node server.js). Khi được require
+// (test HTTP) thì chỉ export app, không tự mở cổng.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`[license-server] listening on :${PORT} (db: ${db.DB_PATH})`);
+    if (!ADMIN_PASSWORD) {
+      console.log('[license-server] WARNING: ADMIN_PASSWORD chưa đặt — /admin chưa đăng nhập được. Đặt biến môi trường ADMIN_PASSWORD.');
+    }
+  });
+}
+
+module.exports = app;
