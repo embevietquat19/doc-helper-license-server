@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.3.0 — server.js
+// Doc Helper License Server 1.3.1 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
@@ -21,7 +21,11 @@ const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, is
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
-const VERSION = '1.3.0';
+// 1.3.1: endpoint báo bản extension mới nhất (GET /api/latest-extension)
+// — popup đọc file latest.json (bản mới + link tải GitHub Releases) để hiện
+// banner "Đã có bản mới" cho khách đang dùng bản cũ. File đọc 1 lần lúc
+// khởi động; đổi bản mới thì sửa latest.json rồi redeploy (hoặc restart).
+const VERSION = '1.3.1';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -117,6 +121,20 @@ function verifyRateLimit(req, res, next) {
 // ---------- Trang trạng thái + trang quản trị ----------
 app.get('/', (req, res) => {
   res.json({ ok: true, service: 'doc-helper-license', version: VERSION });
+});
+// Bản extension mới nhất cho popup báo update (file latest.json ở gốc repo).
+// Không cần đăng nhập; extension gọi khi mở popup (cache 6 giờ phía client).
+let LATEST_EXTENSION = null;
+try {
+  const raw = require('node:fs').readFileSync(path.join(__dirname, 'latest.json'), 'utf8');
+  const parsed = JSON.parse(raw);
+  if (parsed && typeof parsed.version === 'string' && typeof parsed.url === 'string') {
+    LATEST_EXTENSION = { version: parsed.version, url: parsed.url, notes: typeof parsed.notes === 'string' ? parsed.notes : '' };
+  }
+} catch (e) { LATEST_EXTENSION = null; }
+app.get('/api/latest-extension', (req, res) => {
+  if (!LATEST_EXTENSION) return res.status(404).json({ ok: false, error: 'no_update_info' });
+  res.json({ ok: true, ...LATEST_EXTENSION });
 });
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
