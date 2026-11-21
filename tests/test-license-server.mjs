@@ -1,7 +1,9 @@
-// License Server 1.2.0 — tests/test-license-server.mjs
+// License Server 1.3.0 — tests/test-license-server.mjs
 // Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email, không giới hạn) và
 // src/db.js (lưu key dạng hash, license theo email, license không giới hạn,
-// đếm thiết bị, khóa key). Dùng DATA_DIR tạm — không chạm DB thật.
+// đếm thiết bị, khóa key, sửa thông tin khách + số Zalo) và server.js qua
+// HTTP thật (đăng nhập quản trị, tạo/sửa license qua API, rate-limit đăng
+// nhập). Dùng DATA_DIR tạm — không chạm DB thật.
 // Chạy: DATA_DIR=/tmp/license-test-db node tests/test-license-server.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -165,6 +167,112 @@ check('daysRemaining: không giới hạn → null; 30 ngày → ~30',
   check('db.deleteLicense (email không giới hạn): xóa → không tìm thấy nữa', db.deleteLicense(eSaved.id) && db.findLicenseByEmail('vietquat19@gmail.com') === null);
 }
 check('db.stats cuối: total 0', db.stats().total === 0);
+
+// ---------- db.js — sửa thông tin khách + số Zalo ----------
+{
+  const eLic = makeEmailLicense({ days: 30, note: 'khách zalo', maxDevices: 2, email: 'zalo-khach@gmail.com' });
+  const eSaved = db.createLicense({
+    keyHash: eLic.keyHash, prefix: eLic.prefix, note: eLic.note,
+    expiresAt: eLic.expiresAt, maxDevices: eLic.maxDevices, email: eLic.email, zalo: '0901234567'
+  });
+  check('db.createLicense (zalo): lưu được số Zalo khách', eSaved && eSaved.zalo === '0901234567');
+  const u1 = db.updateLicense(eSaved.id, { zalo: '0912345678', note: 'đổi tên khách', maxDevices: 5 });
+  check('db.updateLicense: đổi được zalo + ghi chú + số thiết bị',
+    u1 && u1.zalo === '0912345678' && u1.note === 'đổi tên khách' && u1.maxDevices === 5 && u1.email === 'zalo-khach@gmail.com');
+  const u2 = db.updateLicense(eSaved.id, { expiresAt: UNLIMITED_EXPIRES_AT });
+  check('db.updateLicense: đổi hạn dùng sang không giới hạn', u2 && u2.expiresAt === UNLIMITED_EXPIRES_AT);
+  const u3 = db.updateLicense(eSaved.id, {});
+  check('db.updateLicense: patch rỗng → trả nguyên bản, không đổi gì',
+    u3 && u3.zalo === '0912345678' && u3.expiresAt === UNLIMITED_EXPIRES_AT);
+  check('db.updateLicense: id lạ → null', db.updateLicense(99999, { note: 'x' }) === null);
+  check('db.deleteLicense (zalo): xóa → không tìm thấy nữa', db.deleteLicense(eSaved.id) && db.findLicenseByEmail('zalo-khach@gmail.com') === null);
+}
+check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
+
+// ---------- server.js qua HTTP thật ----------
+{
+  // Rate-limit đăng nhập đặt nhỏ (3 lần) để test được 429 mà không chờ.
+  process.env.ADMIN_PASSWORD = 'Test-Admin-123';
+  process.env.LOGIN_RATE_LIMIT_MAX = '3';
+  process.env.LOGIN_RATE_LIMIT_WINDOW_MS = '60000';
+  const app = (await import('../server.js')).default;
+  const srv = await new Promise((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const port = srv.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  const j = async (path, opts = {}) => {
+    const { headers: extraHeaders = {}, ...rest } = opts;
+    const r = await fetch(base + path, { headers: { 'Content-Type': 'application/json', ...extraHeaders }, ...rest });
+    return { status: r.status, data: await r.json().catch(() => ({})), setCookie: r.headers.get('set-cookie') || '' };
+  };
+  const login = (pw) => j('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pw }) });
+
+  const bad = await login('sai-mat-khau');
+  check('HTTP login: sai mật khẩu → 401', bad.status === 401);
+  const good = await login('Test-Admin-123');
+  check('HTTP login: đúng mật khẩu → 200 + cookie admin', good.status === 200 && /admin_token=/.test(good.setCookie));
+  const cookie = good.setCookie.split(';')[0];
+  const auth = { headers: { Cookie: cookie } };
+  const noAuth = await j('/api/admin/stats');
+  check('HTTP stats: chưa đăng nhập → 401', noAuth.status === 401);
+  const stats = await j('/api/admin/stats', auth);
+  check('HTTP stats: đã đăng nhập → 200', stats.status === 200 && stats.data.ok);
+
+  const created = await j('/api/admin/licenses', {
+    ...auth, method: 'POST',
+    body: JSON.stringify({ email: 'http-khach@gmail.com', days: 30, maxDevices: 2, note: 'khách HTTP', zalo: '0901234567' })
+  });
+  check('HTTP tạo license: email + zalo lưu được',
+    created.status === 200 && created.data.ok && created.data.license?.email === 'http-khach@gmail.com' && created.data.license?.zalo === '0901234567');
+  const id = created.data.license.id;
+  const badZalo = await j('/api/admin/licenses', {
+    ...auth, method: 'POST',
+    body: JSON.stringify({ email: 'http-khach@gmail.com', days: 30, maxDevices: 2, note: 'x', zalo: 'abc' })
+  });
+  check('HTTP tạo license: zalo sai định dạng → 400', badZalo.status === 400 && badZalo.data.error === 'bad_zalo');
+
+  const patched = await j(`/api/admin/licenses/${id}`, {
+    ...auth, method: 'PATCH',
+    body: JSON.stringify({ zalo: '0911111111', note: 'khách VIP', maxDevices: 5, expiresAtISO: '2027-06-30' })
+  });
+  check('HTTP PATCH: đổi được zalo + ghi chú + thiết bị + hạn dùng',
+    patched.status === 200 && patched.data.ok && patched.data.license?.zalo === '0911111111'
+    && patched.data.license?.note === 'khách VIP' && patched.data.license?.maxDevices === 5
+    && new Date(patched.data.license.expiresAt).toISOString().startsWith('2027-06-30'));
+  const patched2 = await j(`/api/admin/licenses/${id}`, {
+    ...auth, method: 'PATCH',
+    body: JSON.stringify({ unlimitedTime: true })
+  });
+  check('HTTP PATCH: unlimitedTime → hết hạn mốc 9999',
+    patched2.status === 200 && patched2.data.license?.expiresAt === 253402300799999);
+  const badPatch = await j(`/api/admin/licenses/${id}`, {
+    ...auth, method: 'PATCH',
+    body: JSON.stringify({ maxDevices: 99 })
+  });
+  check('HTTP PATCH: maxDevices 99 → 400', badPatch.status === 400 && badPatch.data.error === 'bad_max_devices');
+  const notFound = await j('/api/admin/licenses/99999', {
+    ...auth, method: 'PATCH',
+    body: JSON.stringify({ note: 'x' })
+  });
+  check('HTTP PATCH: id lạ → 404', notFound.status === 404);
+  const patchNoAuth = await j(`/api/admin/licenses/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ note: 'x' })
+  });
+  check('HTTP PATCH: chưa đăng nhập → 401', patchNoAuth.status === 401);
+
+  // Rate-limit đăng nhập (giới hạn test = 3): đã dùng 2 lần (1 sai + 1
+  // đúng) → 1 lần sai nữa là đủ 3, lần tiếp theo bị 429.
+  const third = await login('sai-nua');
+  check('HTTP login rate-limit: lần thứ 3 → 401 (chưa vượt)', third.status === 401);
+  const fourth = await login('sai-nua');
+  check('HTTP login rate-limit: lần thứ 4 → 429', fourth.status === 429 && fourth.data.error === 'rate_limited');
+  const blocked = await login('Test-Admin-123');
+  check('HTTP login rate-limit: mật khẩu đúng cũng bị chặn khi đã vượt', blocked.status === 429);
+
+  await new Promise((resolve) => srv.close(resolve));
+}
 
 // Dọn thư mục tạm.
 fs.rmSync(tmpDir, { recursive: true, force: true });
