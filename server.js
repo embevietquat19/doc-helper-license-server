@@ -1,17 +1,20 @@
-// Doc Helper License Server 1.0.0 — server.js
+// Doc Helper License Server 1.1.0 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
-// mục license-server (xem README_DEPLOY.md).
+// mục gốc repo (xem README_DEPLOY.md).
+// 1.1.0: license gắn EMAIL khách thay vì key rời — verify nhận {email}
+// hoặc {key}; tạo license nhận email (trùng email đang còn thì 409).
 'use strict';
 const crypto = require('node:crypto');
 const express = require('express');
 const path = require('node:path');
 const db = require('./src/db');
-const { normalizeKey, isValidKeyFormat, hashKey, makeLicense } = require('./src/keys');
+const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense } = require('./src/keys');
 
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
+const VERSION = '1.1.0';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -88,40 +91,51 @@ function verifyRateLimit(req, res, next) {
 
 // ---------- Trang trạng thái + trang quản trị ----------
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'doc-helper-license', version: '1.0.0' });
+  res.json({ ok: true, service: 'doc-helper-license', version: VERSION });
 });
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 app.use('/admin-static', express.static(path.join(__dirname, 'public')));
 
-// ---------- API công khai: extension gọi để kiểm tra key ----------
+// ---------- API công khai: extension gọi để kiểm tra key/email ----------
+// Body: { key, deviceId } hoặc { email, deviceId } — email được ưu tiên
+// nếu gửi cả hai. Email chuẩn hoá thường trước khi tra cứu.
 app.post('/api/verify', verifyRateLimit, (req, res) => {
   const rawKey = typeof req.body?.key === 'string' ? req.body.key : '';
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
   const deviceId = typeof req.body?.deviceId === 'string'
     ? req.body.deviceId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128)
     : '';
-  if (!isValidKeyFormat(rawKey) || !deviceId) {
+  if (!deviceId) {
     return res.json({ ok: true, valid: false, reason: 'invalid' });
   }
-  const key = normalizeKey(rawKey);
-  const lic = db.findLicenseByHash(hashKey(key));
+  let lic = null;
+  let type = null;
+  if (isValidEmail(rawEmail)) {
+    lic = db.findLicenseByEmail(normalizeEmail(rawEmail));
+    type = 'email';
+  } else if (isValidKeyFormat(rawKey)) {
+    const key = normalizeKey(rawKey);
+    lic = db.findLicenseByHash(hashKey(key));
+    type = 'key';
+  }
   if (!lic) return res.json({ ok: true, valid: false, reason: 'invalid' });
   if (lic.revoked) {
-    return res.json({ ok: true, valid: false, reason: 'revoked', expiresAt: lic.expiresAt });
+    return res.json({ ok: true, valid: false, reason: 'revoked', expiresAt: lic.expiresAt, type });
   }
   if (lic.expiresAt <= Date.now()) {
-    return res.json({ ok: true, valid: false, reason: 'expired', expiresAt: lic.expiresAt });
+    return res.json({ ok: true, valid: false, reason: 'expired', expiresAt: lic.expiresAt, type });
   }
-  const touch = db.touchDevice(hashKey(key), deviceId);
+  const touch = db.touchDeviceByLicenseId(lic.id, deviceId);
   if (!touch.ok && touch.reason === 'device_limit') {
     return res.json({
-      ok: true, valid: false, reason: 'device_limit',
+      ok: true, valid: false, reason: 'device_limit', type,
       expiresAt: lic.expiresAt, deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
     });
   }
   return res.json({
-    ok: true, valid: true,
+    ok: true, valid: true, type,
     expiresAt: lic.expiresAt,
     expiresAtISO: new Date(lic.expiresAt).toISOString(),
     deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
@@ -166,11 +180,32 @@ app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
   const days = Number(req.body?.days);
   const maxDevices = Number(req.body?.maxDevices);
   const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : '';
-  const lic = makeLicense({
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  const opts = {
     days: Number.isFinite(days) && days >= 1 && days <= 3650 ? Math.floor(days) : 30,
     maxDevices: Number.isFinite(maxDevices) && maxDevices >= 1 && maxDevices <= 20 ? Math.floor(maxDevices) : 2,
     note
-  });
+  };
+  // Tạo theo email: khách không nhận key — chỉ kích hoạt email đó.
+  // Email đã có license thì báo 409 kèm bản hiện có (xóa bản cũ rồi tạo
+  // lại, hoặc khóa/mở lại bản cũ).
+  if (rawEmail) {
+    if (!isValidEmail(rawEmail)) {
+      return res.status(400).json({ ok: false, error: 'bad_email' });
+    }
+    const email = normalizeEmail(rawEmail);
+    const existing = db.findLicenseByEmail(email);
+    if (existing) {
+      return res.status(409).json({ ok: false, error: 'email_exists', license: existing });
+    }
+    const lic = makeEmailLicense({ ...opts, email });
+    const saved = db.createLicense({
+      keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
+      expiresAt: lic.expiresAt, maxDevices: lic.maxDevices, email: lic.email
+    });
+    return res.json({ ok: true, email: lic.email, license: saved });
+  }
+  const lic = makeLicense(opts);
   const saved = db.createLicense({
     keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
     expiresAt: lic.expiresAt, maxDevices: lic.maxDevices

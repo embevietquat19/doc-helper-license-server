@@ -37,15 +37,17 @@ license-server/
 
 ### `POST /api/verify` — extension gọi
 Body: `{ "key": "TLV-XXXX-XXXX-XXXX-XXXX", "deviceId": "uuid-cua-may-khach" }`
-Trả về:
-- `{ ok: true, valid: true, expiresAt, expiresAtISO, deviceCount, maxDevices }`
-- `{ ok: true, valid: false, reason: "invalid" | "expired" | "revoked" | "device_limit", expiresAt? }`
+hoặc `{ "email": "khach@gmail.com", "deviceId": "uuid-cua-may-khach" }`
+(gửi cả hai thì email được ưu tiên). Trả về:
+- `{ ok: true, valid: true, type: "key" | "email", expiresAt, expiresAtISO, deviceCount, maxDevices }`
+- `{ ok: true, valid: false, reason: "invalid" | "expired" | "revoked" | "device_limit", expiresAt?, type? }`
 - Rate-limit: 60 lần / 10 phút / IP → 429.
 
 ### API quản trị — cần đăng nhập (cookie `admin_token`, httpOnly, 12 giờ)
 - `POST /api/admin/login` `{ password }` — mật khẩu = biến môi trường `ADMIN_PASSWORD`
 - `GET /api/admin/stats`, `GET /api/admin/licenses`
 - `POST /api/admin/licenses` `{ days, maxDevices, note }` → trả về key gốc **1 lần duy nhất**
+- `POST /api/admin/licenses` `{ days, maxDevices, note, email }` → kích hoạt email khách (không tạo key); email đã có license thì trả 409 `{ error: "email_exists", license }`
 - `POST /api/admin/licenses/:id/revoke` | `/restore` — khóa / mở lại key
 - `DELETE /api/admin/licenses/:id` — xóa hẳn key
 
@@ -93,7 +95,7 @@ v1.5.0 rồi đưa cho khách. Extension gọi `POST {URL}/api/verify`.
 ```bash
 # 1. Server sống
 curl https://license.digimar.site/
-# → {"ok":true,"service":"doc-helper-license","version":"1.0.0"}
+# → {"ok":true,"service":"doc-helper-license","version":"1.1.0"}
 
 # 2. Tạo key từ dòng lệnh trên máy chủ (SSH hoặc terminal hPanel)
 node scripts/admin.js create --days 30 --note "key test" --max-devices 2
