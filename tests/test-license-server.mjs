@@ -1,4 +1,4 @@
-// License Server 1.3.1 — tests/test-license-server.mjs
+// License Server 1.3.2 — tests/test-license-server.mjs
 // Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email, không giới hạn) và
 // src/db.js (lưu key dạng hash, license theo email, license không giới hạn,
 // đếm thiết bị, khóa key, sửa thông tin khách + số Zalo) và server.js qua
@@ -192,9 +192,12 @@ check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
 // ---------- server.js qua HTTP thật ----------
 {
   // Rate-limit đăng nhập đặt nhỏ (3 lần) để test được 429 mà không chờ.
+  // Rate-limit kiểm tra license theo email/key cũng đặt nhỏ (3 lần).
   process.env.ADMIN_PASSWORD = 'Test-Admin-123';
   process.env.LOGIN_RATE_LIMIT_MAX = '3';
   process.env.LOGIN_RATE_LIMIT_WINDOW_MS = '60000';
+  process.env.VERIFY_RATE_LIMIT_MAX = '3';
+  process.env.VERIFY_RATE_LIMIT_WINDOW_MS = '60000';
   const app = (await import('../server.js')).default;
   const srv = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -271,12 +274,29 @@ check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
   const blocked = await login('Test-Admin-123');
   check('HTTP login rate-limit: mật khẩu đúng cũng bị chặn khi đã vượt', blocked.status === 429);
 
+  // Rate-limit kiểm tra license theo email (giới hạn test = 3): 3 lần đầu
+  // vẫn qua (200, license chưa có nên valid:false), lần thứ 4 bị 429; email
+  // khác thì không bị ảnh hưởng (giới hạn tính theo từng email, không phải
+  // toàn cục hay theo IP).
+  const verify = (email) => j('/api/verify', {
+    method: 'POST',
+    body: JSON.stringify({ email, deviceId: 'rl-device-1' }),
+  });
+  const v1 = await verify('rl-test@example.com');
+  const v2 = await verify('rl-test@example.com');
+  const v3 = await verify('rl-test@example.com');
+  check('HTTP verify rate-limit: 3 lần cùng email → 200', v1.status === 200 && v2.status === 200 && v3.status === 200);
+  const v4 = await verify('rl-test@example.com');
+  check('HTTP verify rate-limit: lần thứ 4 cùng email → 429', v4.status === 429 && v4.data.error === 'rate_limited');
+  const vOther = await verify('rl-khac@example.com');
+  check('HTTP verify rate-limit: email khác không bị chặn', vOther.status === 200);
+
   const health = await j('/');
-  check('HTTP health: version 1.3.1', health.status === 200 && health.data.version === '1.3.1');
+  check('HTTP health: version 1.3.2', health.status === 200 && health.data.version === '1.3.2');
   const latest = await j('/api/latest-extension');
-  check('HTTP latest-extension: trả bản mới nhất 1.7.7 + link GitHub Releases',
-    latest.status === 200 && latest.data.ok && latest.data.version === '1.7.7'
-    && latest.data.url === 'https://github.com/embevietquat19/doc-helper/releases/download/v1.7.7/doc-helper-v1.7.7.zip'
+  check('HTTP latest-extension: trả bản mới nhất 1.7.9 + link GitHub Releases',
+    latest.status === 200 && latest.data.ok && latest.data.version === '1.7.9'
+    && latest.data.url === 'https://github.com/embevietquat19/doc-helper/releases/download/v1.7.9/doc-helper-v1.7.9.zip'
     && typeof latest.data.notes === 'string' && latest.data.notes.length > 0);
 
   await new Promise((resolve) => srv.close(resolve));
