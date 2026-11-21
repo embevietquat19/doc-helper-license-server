@@ -1,7 +1,7 @@
-// License Server 1.1.0 — tests/test-license-server.mjs
-// Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email) và src/db.js (lưu
-// key dạng hash, license theo email, đếm thiết bị, khóa key). Dùng DATA_DIR
-// tạm — không chạm DB thật.
+// License Server 1.2.0 — tests/test-license-server.mjs
+// Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email, không giới hạn) và
+// src/db.js (lưu key dạng hash, license theo email, license không giới hạn,
+// đếm thiết bị, khóa key). Dùng DATA_DIR tạm — không chạm DB thật.
 // Chạy: DATA_DIR=/tmp/license-test-db node tests/test-license-server.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -13,7 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-test-'));
 process.env.DATA_DIR = tmpDir;
 
-const { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense } = (await import('../src/keys.js')).default;
+const { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, UNLIMITED_EXPIRES_AT, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices } = (await import('../src/keys.js')).default;
 const db = (await import('../src/db.js')).default;
 
 let pass = 0, fail = 0;
@@ -115,6 +115,54 @@ check('db.stats sau xóa: total 0', db.stats().total === 0);
   }
   check('db.revokeLicense (email): khóa → tìm lại thấy revoked', db.revokeLicense(eSaved.id, true) && db.findLicenseByEmail('khach@gmail.com').revoked === true);
   check('db.deleteLicense (email): xóa → không tìm thấy nữa', db.deleteLicense(eSaved.id) && db.findLicenseByEmail('khach@gmail.com') === null);
+}
+check('db.stats sau xóa email: total 0', db.stats().total === 0);
+
+// ---------- keys.js + db.js — license không giới hạn ----------
+check('UNLIMITED_EXPIRES_AT là 31/12/9999', UNLIMITED_EXPIRES_AT === 253402300799999
+  && new Date(UNLIMITED_EXPIRES_AT).toISOString().startsWith('9999-12-31'));
+check('isUnlimitedExpiry: mốc 9999 → true, ngày thường → false',
+  isUnlimitedExpiry(UNLIMITED_EXPIRES_AT) && !isUnlimitedExpiry(Date.now() + 30 * 24 * 60 * 60 * 1000));
+check('isUnlimitedDevices: 0 → true, 2 → false', isUnlimitedDevices(0) && !isUnlimitedDevices(2));
+check('daysRemaining: không giới hạn → null; 30 ngày → ~30',
+  daysRemaining(UNLIMITED_EXPIRES_AT) === null
+  && daysRemaining(Date.now() + 30 * 24 * 60 * 60 * 1000) >= 29
+  && daysRemaining(Date.now() + 30 * 24 * 60 * 60 * 1000) <= 30);
+{
+  const lic = makeLicense({ days: 0, maxDevices: 0, note: 'không giới hạn' });
+  check('makeLicense days=0: hết hạn = mốc 9999', lic.expiresAt === UNLIMITED_EXPIRES_AT && isUnlimitedExpiry(lic.expiresAt));
+  check('makeLicense maxDevices=0: không giới hạn thiết bị', lic.maxDevices === 0 && isUnlimitedDevices(lic.maxDevices));
+  const lic30 = makeLicense({ days: 30, maxDevices: 2 });
+  check('makeLicense days=30 vẫn có hạn như cũ', !isUnlimitedExpiry(lic30.expiresAt) && lic30.maxDevices === 2);
+}
+{
+  const eLic = makeEmailLicense({ days: 0, maxDevices: 0, email: 'vietquat19@gmail.com', note: 'test không giới hạn' });
+  const eSaved = db.createLicense({
+    keyHash: eLic.keyHash, prefix: eLic.prefix, note: eLic.note,
+    expiresAt: eLic.expiresAt, maxDevices: eLic.maxDevices, email: eLic.email
+  });
+  check('db.createLicense (email không giới hạn): lưu được, hết hạn mốc 9999',
+    eSaved && eSaved.email === 'vietquat19@gmail.com' && eSaved.expiresAt === UNLIMITED_EXPIRES_AT && eSaved.maxDevices === 0);
+  const found = db.findLicenseByEmail('vietquat19@gmail.com');
+  check('db.findLicenseByEmail: tìm được license không giới hạn', found?.id === eSaved.id && found.expiresAt === UNLIMITED_EXPIRES_AT);
+  {
+    // Không giới hạn thiết bị: máy 1, 2, 3, 4, 5 đều OK.
+    let allOk = true;
+    for (let i = 1; i <= 5; i++) {
+      const t = db.touchDeviceByLicenseId(eSaved.id, 'device-' + i);
+      if (!t.ok || t.deviceCount !== i) allOk = false;
+    }
+    check('db.touchDevice (không giới hạn): 5 thiết bị đều OK, đếm đủ 5', allOk);
+    const again = db.touchDeviceByLicenseId(eSaved.id, 'device-2');
+    check('db.touchDevice (không giới hạn): thiết bị cũ dùng lại vẫn OK, không tính thêm', again.ok && again.deviceCount === 5);
+  }
+  {
+    const list = db.listLicenses();
+    check('db.listLicenses: license không giới hạn đếm 5 thiết bị', list.length === 1 && list[0].deviceCount === 5 && list[0].maxDevices === 0);
+    const stats = db.stats();
+    check('db.stats: license không giới hạn vẫn tính active', stats.total === 1 && stats.active === 1);
+  }
+  check('db.deleteLicense (email không giới hạn): xóa → không tìm thấy nữa', db.deleteLicense(eSaved.id) && db.findLicenseByEmail('vietquat19@gmail.com') === null);
 }
 check('db.stats cuối: total 0', db.stats().total === 0);
 
