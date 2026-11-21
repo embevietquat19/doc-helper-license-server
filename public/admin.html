@@ -21,6 +21,8 @@
   input, select { width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
   .row { display: flex; gap: 12px; }
   .row > div { flex: 1; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #1a2233; }
+  .check input { width: auto; }
   button.primary { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 14px; cursor: pointer; margin-top: 14px; }
   button.primary:disabled { background: #94a3b8; cursor: default; }
   .newkey { margin-top: 14px; background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 12px; display: none; }
@@ -72,13 +74,15 @@
       <div class="row">
         <div>
           <label for="days">Số ngày dùng được</label>
-          <input id="days" type="number" min="1" max="3650" value="30">
+          <input id="days" type="number" min="0" max="3650" value="30">
         </div>
         <div>
           <label for="maxDevices">Số thiết bị tối đa / key</label>
-          <input id="maxDevices" type="number" min="1" max="20" value="2">
+          <input id="maxDevices" type="number" min="0" max="20" value="2">
         </div>
       </div>
+      <label class="check"><input type="checkbox" id="unlimitedTime"> Không giới hạn thời gian (dùng mãi mãi)</label>
+      <label class="check"><input type="checkbox" id="unlimitedDevices"> Không giới hạn thiết bị</label>
       <label for="email">Email khách — nhập email để kích hoạt theo email (khách nhập email này trong extension là tải được, không cần cấp key). Để trống để tạo key rời thay vì email.</label>
       <input id="email" type="email" maxlength="254" placeholder="vidu@gmail.com">
       <label for="note">Ghi chú (tên khách, đơn hàng…)</label>
@@ -152,11 +156,13 @@ function renderList(licenses) {
     const ident = l.email
       ? escapeHtml(l.email)
       : `<code>${l.prefix}…</code>`;
+    const expiry = l.expiresAt >= 253402300799999 ? 'Không giới hạn' : fmtDate(l.expiresAt);
+    const devices = l.maxDevices === 0 ? `${l.deviceCount} · không giới hạn` : `${l.deviceCount} / ${l.maxDevices}`;
     html += `<tr>
       <td>${ident}<br><span class="muted">#${l.id} · tạo ${fmtDate(l.createdAt)}</span></td>
       <td>${escapeHtml(l.note || '')}</td>
-      <td>${fmtDate(l.expiresAt)}</td>
-      <td>${l.deviceCount} / ${l.maxDevices}</td>
+      <td>${expiry}</td>
+      <td>${devices}</td>
       <td>${statusBadge(l)}</td>
       <td>
         ${l.revoked
@@ -215,8 +221,8 @@ $('createBtn').addEventListener('click', async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        days: Number($('days').value),
-        maxDevices: Number($('maxDevices').value),
+        days: $('unlimitedTime').checked ? 0 : Number($('days').value),
+        maxDevices: $('unlimitedDevices').checked ? 0 : Number($('maxDevices').value),
         note: $('note').value.trim(),
         email: $('email').value.trim()
       })
@@ -247,6 +253,10 @@ $('createBtn').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// Tích "không giới hạn" thì vô hiệu hoá ô số tương ứng.
+$('unlimitedTime').addEventListener('change', () => { $('days').disabled = $('unlimitedTime').checked; });
+$('unlimitedDevices').addEventListener('change', () => { $('maxDevices').disabled = $('unlimitedDevices').checked; });
 
 // Thử tải danh sách ngay — nếu đã đăng nhập (cookie còn hạn) thì vào thẳng app.
 api('/api/admin/stats').then((d) => { if (d.ok) { showApp(); loadAll(); } }).catch(() => showLogin());
