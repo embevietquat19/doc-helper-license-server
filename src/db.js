@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.1.0 — src/db.js
+// Doc Helper License Server 1.2.0 — src/db.js
 // SQLite qua node:sqlite (có sẵn từ Node 22+, không cần gói native).
 // Lưu key dạng HASH SHA-256 (không lưu key gốc — lộ DB cũng không dùng được
 // key). Mỗi key: hạn dùng, trạng thái, số thiết bị tối đa, ghi chú.
@@ -6,6 +6,9 @@
 // license email có prefix 'EMAIL' và key_hash là 1 key ngẫu nhiên đã bỏ
 // đi, không ai biết). Bảng devices: 1 dòng / (key, deviceId) — đếm thiết
 // bị đã kích hoạt.
+// Từ 1.2.0: license KHÔNG GIỚI HẠN — expires_at = 31/12/9999 (mốc
+// UNLIMITED_EXPIRES_AT trong keys.js) nghĩa là không hết hạn;
+// max_devices = 0 nghĩa là không giới hạn thiết bị (touchDevice luôn OK).
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -57,12 +60,18 @@ function rowToLicense(r) {
   };
 }
 
-// Ghi nhận 1 thiết bị dùng key. Trả { ok, deviceCount, reason }:
+// Ghi nhận 1 thiết bị dùng license. Trả { ok, deviceCount, reason }:
 // - ok=false khi đã đủ số thiết bị tối đa mà deviceId này chưa từng dùng.
-function touchDevice(keyHash, deviceId) {
+// - max_devices = 0 → không giới hạn thiết bị: luôn OK, vẫn đếm để hiển thị.
+// Nhận keyHash (từ /api/verify theo key) HOẶC licenseId (từ verify theo
+// email — không có key để tính hash từ phía gọi).
+function touchDevice(keyHashOrId, deviceId, byId) {
   const now = Date.now();
-  const lic = db.prepare('SELECT max_devices FROM licenses WHERE key_hash = ?').get(keyHash);
+  const lic = byId
+    ? db.prepare('SELECT key_hash, max_devices FROM licenses WHERE id = ?').get(keyHashOrId)
+    : db.prepare('SELECT key_hash, max_devices FROM licenses WHERE key_hash = ?').get(keyHashOrId);
   if (!lic) return { ok: false, reason: 'not_found' };
+  const keyHash = lic.key_hash;
   const existing = db.prepare(
     'SELECT 1 FROM devices WHERE key_hash = ? AND device_id = ?'
   ).get(keyHash, deviceId);
@@ -75,7 +84,7 @@ function touchDevice(keyHash, deviceId) {
     return { ok: true, deviceCount: n };
   }
   const count = db.prepare('SELECT COUNT(*) AS n FROM devices WHERE key_hash = ?').get(keyHash).n;
-  if (count >= lic.max_devices) return { ok: false, reason: 'device_limit', deviceCount: count };
+  if (lic.max_devices !== 0 && count >= lic.max_devices) return { ok: false, reason: 'device_limit', deviceCount: count };
   db.prepare(
     'INSERT INTO devices (key_hash, device_id, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)'
   ).run(keyHash, deviceId, now, now);
@@ -126,9 +135,7 @@ module.exports = {
   // Đếm thiết bị theo ID license (dùng cho license email — không có key
   // để tính hash từ phía gọi).
   touchDeviceByLicenseId(id, deviceId) {
-    const row = db.prepare('SELECT key_hash FROM licenses WHERE id = ?').get(id);
-    if (!row) return { ok: false, reason: 'not_found' };
-    return touchDevice(row.key_hash, deviceId);
+    return touchDevice(id, deviceId, true);
   },
   stats() {
     const total = db.prepare('SELECT COUNT(*) AS n FROM licenses').get().n;

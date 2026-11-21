@@ -1,10 +1,13 @@
-// Doc Helper License Server 1.1.0 — src/keys.js
+// Doc Helper License Server 1.2.0 — src/keys.js
 // Định dạng key: TLV-XXXX-XXXX-XXXX-XXXX (16 ký tự, Crockford base32,
 // bỏ 0/O/1/I/L để tránh nhầm khi gõ tay). 16 ký tự = 80 bit — không đoán
 // nổi, kể cả khi kẻ xấu thử hàng triệu lần (có rate-limit ở /verify).
 // Từ 1.1.0: license có thể gắn với EMAIL khách thay vì key rời — khách
 // thanh toán rồi gửi email, shop kích hoạt email đó; extension nhập email
 // là tải được, không cần cấp key.
+// Từ 1.2.0: license KHÔNG GIỚI HẠN — days = 0 → hết hạn 31/12/9999
+// (UNLIMITED_EXPIRES_AT), maxDevices = 0 → không giới hạn thiết bị.
+// Dùng mốc 9999 thay vì NULL để không phải migrate DB đang chạy.
 'use strict';
 const crypto = require('node:crypto');
 
@@ -48,11 +51,32 @@ function hashKey(normalizedKey) {
   return crypto.createHash('sha256').update(normalizedKey, 'utf8').digest('hex');
 }
 
+// Mốc "không giới hạn thời gian": 31/12/9999 23:59:59.999 UTC.
+// DB hiện tại để expires_at NOT NULL nên dùng mốc này thay vì NULL —
+// mọi phép so sánh hết hạn vẫn đúng, không cần migrate DB đang chạy.
+const UNLIMITED_EXPIRES_AT = 253402300799999;
+
+function isUnlimitedExpiry(expiresAt) {
+  return typeof expiresAt === 'number' && expiresAt >= UNLIMITED_EXPIRES_AT;
+}
+
+// Số ngày còn lại (làm tròn lên); null khi không giới hạn thời gian.
+function daysRemaining(expiresAt, nowMs) {
+  if (isUnlimitedExpiry(expiresAt)) return null;
+  const now = typeof nowMs === 'number' ? nowMs : Date.now();
+  return Math.max(0, Math.ceil((expiresAt - now) / (24 * 60 * 60 * 1000)));
+}
+
+function isUnlimitedDevices(maxDevices) {
+  return maxDevices === 0;
+}
+
 // Tạo key mới: { key (hiển thị 1 lần duy nhất), prefix, expiresAt }.
-// days: số ngày dùng được (mặc định 30). Trả về cả ngày hết hạn ISO.
+// days: số ngày dùng được (mặc định 30); days = 0 → không giới hạn thời
+// gian. maxDevices = 0 → không giới hạn thiết bị.
 function makeLicense({ days = 30, note = '', maxDevices = 2 } = {}) {
   const key = generateKey();
-  const expiresAt = Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
+  const expiresAt = days === 0 ? UNLIMITED_EXPIRES_AT : Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
   return {
     key,
     keyHash: hashKey(key),
@@ -81,7 +105,7 @@ function isValidEmail(raw) {
 // UNIQUE của bảng. prefix 'EMAIL' để nhận diện trong danh sách.
 function makeEmailLicense({ days = 30, note = '', maxDevices = 2, email = '' } = {}) {
   const key = generateKey(); // sinh rồi bỏ — không trả về cho ai
-  const expiresAt = Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
+  const expiresAt = days === 0 ? UNLIMITED_EXPIRES_AT : Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
   return {
     email: normalizeEmail(email),
     keyHash: hashKey(key),
@@ -92,4 +116,4 @@ function makeEmailLicense({ days = 30, note = '', maxDevices = 2, email = '' } =
   };
 }
 
-module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense };
+module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, UNLIMITED_EXPIRES_AT, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices };
