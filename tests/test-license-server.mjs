@@ -1,4 +1,4 @@
-// License Server 1.3.0 — tests/test-license-server.mjs
+// License Server 1.3.1 — tests/test-license-server.mjs
 // Kiểm chứng src/keys.js (sinh + chuẩn hoá key, email, không giới hạn) và
 // src/db.js (lưu key dạng hash, license theo email, license không giới hạn,
 // đếm thiết bị, khóa key, sửa thông tin khách + số Zalo) và server.js qua
@@ -270,6 +270,14 @@ check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
   check('HTTP login rate-limit: lần thứ 4 → 429', fourth.status === 429 && fourth.data.error === 'rate_limited');
   const blocked = await login('Test-Admin-123');
   check('HTTP login rate-limit: mật khẩu đúng cũng bị chặn khi đã vượt', blocked.status === 429);
+
+  const health = await j('/');
+  check('HTTP health: version 1.3.1', health.status === 200 && health.data.version === '1.3.1');
+  const latest = await j('/api/latest-extension');
+  check('HTTP latest-extension: trả bản mới nhất 1.7.7 + link GitHub Releases',
+    latest.status === 200 && latest.data.ok && latest.data.version === '1.7.7'
+    && latest.data.url === 'https://github.com/embevietquat19/doc-helper/releases/download/v1.7.7/doc-helper-v1.7.7.zip'
+    && typeof latest.data.notes === 'string' && latest.data.notes.length > 0);
 
   await new Promise((resolve) => srv.close(resolve));
 }
