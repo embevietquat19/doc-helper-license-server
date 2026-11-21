@@ -1,7 +1,10 @@
-// Doc Helper License Server 1.0.0 — src/keys.js
+// Doc Helper License Server 1.1.0 — src/keys.js
 // Định dạng key: TLV-XXXX-XXXX-XXXX-XXXX (16 ký tự, Crockford base32,
 // bỏ 0/O/1/I/L để tránh nhầm khi gõ tay). 16 ký tự = 80 bit — không đoán
 // nổi, kể cả khi kẻ xấu thử hàng triệu lần (có rate-limit ở /verify).
+// Từ 1.1.0: license có thể gắn với EMAIL khách thay vì key rời — khách
+// thanh toán rồi gửi email, shop kích hoạt email đó; extension nhập email
+// là tải được, không cần cấp key.
 'use strict';
 const crypto = require('node:crypto');
 
@@ -60,4 +63,33 @@ function makeLicense({ days = 30, note = '', maxDevices = 2 } = {}) {
   };
 }
 
-module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense };
+// --- License theo email ---
+// Chuẩn hoá email: cắt khoảng trắng, viết thường (so sánh không phân biệt
+// hoa/thường).
+function normalizeEmail(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw.trim().toLowerCase();
+}
+
+function isValidEmail(raw) {
+  const e = normalizeEmail(raw);
+  return e.length > 0 && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+}
+
+// Tạo license theo email: khách không nhận key — key_hash lưu 1 key ngẫu
+// nhiên rồi bỏ đi (không trả về, không ai biết), chỉ để đủ cột NOT NULL /
+// UNIQUE của bảng. prefix 'EMAIL' để nhận diện trong danh sách.
+function makeEmailLicense({ days = 30, note = '', maxDevices = 2, email = '' } = {}) {
+  const key = generateKey(); // sinh rồi bỏ — không trả về cho ai
+  const expiresAt = Date.now() + Math.max(1, days) * 24 * 60 * 60 * 1000;
+  return {
+    email: normalizeEmail(email),
+    keyHash: hashKey(key),
+    prefix: 'EMAIL',
+    note,
+    expiresAt,
+    maxDevices
+  };
+}
+
+module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense };
