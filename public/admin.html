@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doc Helper — Quản lý key Tailieu.vn</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f4f6f8; color: #1a2233; }
+  header { background: #1e293b; color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 18px; margin: 0; }
+  header button { background: transparent; border: 1px solid #64748b; color: #fff; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  main { max-width: 960px; margin: 24px auto; padding: 0 16px 48px; }
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .card h2 { margin: 0 0 12px; font-size: 16px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
+  .stat b { display: block; font-size: 24px; }
+  .stat span { color: #64748b; font-size: 13px; }
+  label { display: block; font-size: 13px; color: #475569; margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button.primary { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 14px; cursor: pointer; margin-top: 14px; }
+  button.primary:disabled { background: #94a3b8; cursor: default; }
+  .newkey { margin-top: 14px; background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 12px; display: none; }
+  .newkey code { font-size: 18px; letter-spacing: 1px; user-select: all; }
+  .newkey p { margin: 6px 0 0; color: #065f46; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  th { color: #64748b; font-size: 12px; text-transform: uppercase; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+  .ok { background: #dcfce7; color: #166534; }
+  .warn { background: #fef3c7; color: #92400e; }
+  .bad { background: #fee2e2; color: #991b1b; }
+  .muted { color: #64748b; font-size: 13px; }
+  td .act { background: none; border: 1px solid #cbd5e1; border-radius: 5px; padding: 4px 8px; font-size: 12px; cursor: pointer; margin-right: 4px; }
+  td .act.danger { border-color: #fca5a5; color: #b91c1c; }
+  #login { max-width: 420px; margin: 80px auto; }
+  .err { color: #b91c1c; font-size: 13px; margin-top: 8px; display: none; }
+  @media (max-width: 640px) { .row { flex-direction: column; } table { font-size: 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Doc Helper — Key Tailieu.vn</h1>
+  <button id="logoutBtn" style="display:none">Đăng xuất</button>
+</header>
+
+<main>
+  <div id="login" class="card">
+    <h2>Đăng nhập quản trị</h2>
+    <label for="pw">Mật khẩu quản trị (ADMIN_PASSWORD)</label>
+    <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••">
+    <div class="err" id="loginErr">Sai mật khẩu.</div>
+    <button class="primary" id="loginBtn">Đăng nhập</button>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="card">
+      <h2>Tổng quan</h2>
+      <div class="stats">
+        <div class="stat"><b id="stTotal">–</b><span>Tổng key</span></div>
+        <div class="stat"><b id="stActive">–</b><span>Đang còn hạn</span></div>
+        <div class="stat"><b id="stExpired">–</b><span>Hết hạn</span></div>
+        <div class="stat"><b id="stRevoked">–</b><span>Bị khóa</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tạo key mới</h2>
+      <div class="row">
+        <div>
+          <label for="days">Số ngày dùng được</label>
+          <input id="days" type="number" min="1" max="3650" value="30">
+        </div>
+        <div>
+          <label for="maxDevices">Số thiết bị tối đa / key</label>
+          <input id="maxDevices" type="number" min="1" max="20" value="2">
+        </div>
+      </div>
+      <label for="note">Ghi chú (tên khách, đơn hàng…)</label>
+      <input id="note" type="text" maxlength="200" placeholder="Ví dụ: Khách Nguyễn Văn A — 30 ngày">
+      <button class="primary" id="createBtn">Tạo key</button>
+      <div class="newkey" id="newKeyBox">
+        <div>Key mới: <code id="newKey"></code></div>
+        <p>⚠️ Key chỉ hiện 1 lần này — copy gửi cho khách ngay. Server không lưu key gốc nên không xem lại được.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Danh sách key</h2>
+      <div id="list"><p class="muted">Đang tải…</p></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtDate = (ms) => new Date(ms).toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+  return data;
+}
+
+function showLogin() {
+  $('login').style.display = '';
+  $('app').style.display = 'none';
+  $('logoutBtn').style.display = 'none';
+}
+function showApp() {
+  $('login').style.display = 'none';
+  $('app').style.display = '';
+  $('logoutBtn').style.display = '';
+}
+
+async function loadAll() {
+  const [stats, list] = await Promise.all([
+    api('/api/admin/stats'),
+    api('/api/admin/licenses')
+  ]);
+  if (stats.ok) {
+    $('stTotal').textContent = stats.stats.total;
+    $('stActive').textContent = stats.stats.active;
+    $('stExpired').textContent = stats.stats.expired;
+    $('stRevoked').textContent = stats.stats.revoked;
+  }
+  if (list.ok) renderList(list.licenses);
+}
+
+function statusBadge(l) {
+  const now = Date.now();
+  if (l.revoked) return '<span class="badge bad">Bị khóa</span>';
+  if (l.expiresAt <= now) return '<span class="badge warn">Hết hạn</span>';
+  return '<span class="badge ok">Còn hạn</span>';
+}
+
+function renderList(licenses) {
+  if (!licenses.length) { $('list').innerHTML = '<p class="muted">Chưa có key nào.</p>'; return; }
+  let html = '<table><thead><tr><th>Key</th><th>Ghi chú</th><th>Hết hạn</th><th>Thiết bị</th><th>Trạng thái</th><th></th></tr></thead><tbody>';
+  for (const l of licenses) {
+    html += `<tr>
+      <td><code>${l.prefix}…</code><br><span class="muted">#${l.id} · tạo ${fmtDate(l.createdAt)}</span></td>
+      <td>${escapeHtml(l.note || '')}</td>
+      <td>${fmtDate(l.expiresAt)}</td>
+      <td>${l.deviceCount} / ${l.maxDevices}</td>
+      <td>${statusBadge(l)}</td>
+      <td>
+        ${l.revoked
+          ? `<button class="act" data-act="restore" data-id="${l.id}">Mở lại</button>`
+          : `<button class="act danger" data-act="revoke" data-id="${l.id}">Khóa</button>`}
+        <button class="act danger" data-act="delete" data-id="${l.id}">Xóa</button>
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('list').innerHTML = html;
+  $('list').querySelectorAll('button[data-act]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.dataset.id, act = b.dataset.act;
+      if (act === 'delete' && !confirm('Xóa hẳn key này? Khách đang dùng sẽ dừng ngay.')) return;
+      if (act === 'revoke' && !confirm('Khóa key này? Khách đang dùng sẽ dừng ngay.')) return;
+      if (act === 'delete') await api(`/api/admin/licenses/${id}`, { method: 'DELETE' });
+      else if (act === 'revoke') await api(`/api/admin/licenses/${id}/revoke`, { method: 'POST' });
+      else await api(`/api/admin/licenses/${id}/restore`, { method: 'POST' });
+      loadAll();
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+$('loginBtn').addEventListener('click', async () => {
+  const r = await fetch('/api/admin/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: $('pw').value })
+  });
+  if (!r.ok) { $('loginErr').style.display = ''; return; }
+  $('loginErr').style.display = 'none';
+  $('pw').value = '';
+  showApp();
+  loadAll();
+});
+$('pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+
+$('logoutBtn').addEventListener('click', async () => {
+  await fetch('/api/admin/logout', { method: 'POST' });
+  showLogin();
+});
+
+$('createBtn').addEventListener('click', async () => {
+  const btn = $('createBtn');
+  btn.disabled = true;
+  try {
+    const data = await api('/api/admin/licenses', {
+      method: 'POST',
+      body: JSON.stringify({
+        days: Number($('days').value),
+        maxDevices: Number($('maxDevices').value),
+        note: $('note').value.trim()
+      })
+    });
+    if (data.ok) {
+      $('newKey').textContent = data.key;
+      $('newKeyBox').style.display = '';
+      $('note').value = '';
+      loadAll();
+    }
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Thử tải danh sách ngay — nếu đã đăng nhập (cookie còn hạn) thì vào thẳng app.
+api('/api/admin/stats').then((d) => { if (d.ok) { showApp(); loadAll(); } }).catch(() => showLogin());
+</script>
+</body>
+</html>
