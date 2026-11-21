@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.3.1 — server.js
+// Doc Helper License Server 1.3.2 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
@@ -21,11 +21,11 @@ const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, is
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const IS_PROD = process.env.NODE_ENV === 'production';
-// 1.3.1: endpoint báo bản extension mới nhất (GET /api/latest-extension)
+// 1.3.2: endpoint báo bản extension mới nhất (GET /api/latest-extension)
 // — popup đọc file latest.json (bản mới + link tải GitHub Releases) để hiện
 // banner "Đã có bản mới" cho khách đang dùng bản cũ. File đọc 1 lần lúc
 // khởi động; đổi bản mới thì sửa latest.json rồi redeploy (hoặc restart).
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -103,12 +103,36 @@ function loginRateLimit(req, res, next) {
   next();
 }
 
-// ---------- Rate-limit cho /api/verify: 60 lần / 10 phút / IP ----------
+// ---------- Rate-limit cho /api/verify: theo từng email/key + theo IP ----------
+// Trước đây chỉ giới hạn theo IP (60 lần / 10 phút / IP), nhưng sau CDN của
+// Hostinger IP thật bị che nên giới hạn này không chặn được gì (đợt kiểm tra
+// ~780 lượt gọi vẫn lọt hết). Giờ siết theo từng "chứng chỉ" — email hoặc
+// key — vì đó mới là thứ kẻ dò key/email nhắm tới: mỗi email/key chỉ được
+// 30 lần kiểm tra / 10 phút (người dùng thật chỉ kiểm tra vài lần/ngày,
+// popup còn cache 1 giờ nên 30 là thừa). Giới hạn theo IP vẫn giữ làm lớp
+// chặn thô phía sau (60/10 phút). Cả 2 đều chỉnh được qua biến môi trường
+// (để test đặt nhỏ lại).
+const VERIFY_RATE_LIMIT_MAX = Number(process.env.VERIFY_RATE_LIMIT_MAX) || 30;
+const VERIFY_RATE_LIMIT_WINDOW_MS = Number(process.env.VERIFY_RATE_LIMIT_WINDOW_MS) || 10 * 60 * 1000;
 const verifyHits = new Map(); // ip -> [timestamps]
+const verifyCredHits = new Map(); // 'email:x' | 'key:<hash>' | 'anon:<ip>' -> [timestamps]
 function verifyRateLimit(req, res, next) {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const now = Date.now();
-  const windowMs = 10 * 60 * 1000;
+  const windowMs = VERIFY_RATE_LIMIT_WINDOW_MS;
+  // Khóa theo chứng chỉ: email chuẩn hoá, hoặc băm SHA-256 của key (không
+  // lưu key thô trong bộ nhớ), hoặc IP nếu không có cả hai.
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  const rawKey = typeof req.body?.key === 'string' ? req.body.key : '';
+  let credKey = 'anon:' + ip;
+  if (isValidEmail(rawEmail)) credKey = 'email:' + normalizeEmail(rawEmail);
+  else if (isValidKeyFormat(rawKey)) credKey = 'key:' + hashKey(normalizeKey(rawKey));
+  const credList = (verifyCredHits.get(credKey) || []).filter((t) => now - t < windowMs);
+  if (credList.length >= VERIFY_RATE_LIMIT_MAX) {
+    return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: Math.ceil(windowMs / 1000) });
+  }
+  credList.push(now);
+  verifyCredHits.set(credKey, credList);
   const list = (verifyHits.get(ip) || []).filter((t) => now - t < windowMs);
   if (list.length >= 60) {
     return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 600 });

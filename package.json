@@ -1,6 +1,6 @@
 {
   "name": "doc-helper-license-server",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "License server cho Doc Helper — cấp key / kích hoạt email Tailieu.vn, kiểm tra online (hết hạn / bị khóa / quá số thiết bị thì dừng), hỗ trợ license không giới hạn.",
   "private": true,
   "type": "commonjs",
