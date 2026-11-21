@@ -1,0 +1,204 @@
+// Doc Helper License Server 1.0.0 — server.js
+// Express + SQLite (node:sqlite). Chạy: npm install && npm start.
+// Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
+// mục license-server (xem README_DEPLOY.md).
+'use strict';
+const crypto = require('node:crypto');
+const express = require('express');
+const path = require('node:path');
+const db = require('./src/db');
+const { normalizeKey, isValidKeyFormat, hashKey, makeLicense } = require('./src/keys');
+
+const PORT = process.env.PORT || 3001;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+const app = express();
+app.use(express.json({ limit: '64kb' }));
+app.disable('x-powered-by');
+
+// ---------- Phiên quản trị (token ngẫu nhiên trong cookie httpOnly) ----------
+const adminTokens = new Map(); // token -> expiresAt (ms)
+function issueAdminToken(res) {
+  const token = crypto.randomBytes(32).toString('hex');
+  adminTokens.set(token, Date.now() + 12 * 60 * 60 * 1000);
+  res.cookie('admin_token', token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PROD,
+    maxAge: 12 * 60 * 60 * 1000,
+    path: '/'
+  });
+  return token;
+}
+function isAdmin(req) {
+  const token = req.cookies?.admin_token || req.headers['x-admin-token'];
+  if (!token) return false;
+  const exp = adminTokens.get(token);
+  if (!exp) return false;
+  if (exp < Date.now()) { adminTokens.delete(token); return false; }
+  return true;
+}
+// Cookie parser tối giản (không thêm dependency)
+app.use((req, res, next) => {
+  req.cookies = {};
+  const raw = req.headers.cookie;
+  if (raw) {
+    for (const part of raw.split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0) req.cookies[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    }
+  }
+  next();
+});
+
+// Chống CSRF cơ bản cho API đổi dữ liệu: Origin (nếu có) phải cùng host.
+function sameOrigin(req, res, next) {
+  const origin = req.headers.origin;
+  if (origin) {
+    try {
+      const o = new URL(origin);
+      const h = (req.headers.host || '').split(':')[0];
+      if (o.hostname !== h && o.hostname !== 'localhost') {
+        return res.status(403).json({ ok: false, error: 'forbidden_origin' });
+      }
+    } catch { return res.status(403).json({ ok: false, error: 'bad_origin' }); }
+  }
+  next();
+}
+
+// ---------- Rate-limit cho /api/verify: 60 lần / 10 phút / IP ----------
+const verifyHits = new Map(); // ip -> [timestamps]
+function verifyRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const list = (verifyHits.get(ip) || []).filter((t) => now - t < windowMs);
+  if (list.length >= 60) {
+    return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 600 });
+  }
+  list.push(now);
+  verifyHits.set(ip, list);
+  next();
+}
+
+// ---------- Trang trạng thái + trang quản trị ----------
+app.get('/', (req, res) => {
+  res.json({ ok: true, service: 'doc-helper-license', version: '1.0.0' });
+});
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+app.use('/admin-static', express.static(path.join(__dirname, 'public')));
+
+// ---------- API công khai: extension gọi để kiểm tra key ----------
+app.post('/api/verify', verifyRateLimit, (req, res) => {
+  const rawKey = typeof req.body?.key === 'string' ? req.body.key : '';
+  const deviceId = typeof req.body?.deviceId === 'string'
+    ? req.body.deviceId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128)
+    : '';
+  if (!isValidKeyFormat(rawKey) || !deviceId) {
+    return res.json({ ok: true, valid: false, reason: 'invalid' });
+  }
+  const key = normalizeKey(rawKey);
+  const lic = db.findLicenseByHash(hashKey(key));
+  if (!lic) return res.json({ ok: true, valid: false, reason: 'invalid' });
+  if (lic.revoked) {
+    return res.json({ ok: true, valid: false, reason: 'revoked', expiresAt: lic.expiresAt });
+  }
+  if (lic.expiresAt <= Date.now()) {
+    return res.json({ ok: true, valid: false, reason: 'expired', expiresAt: lic.expiresAt });
+  }
+  const touch = db.touchDevice(hashKey(key), deviceId);
+  if (!touch.ok && touch.reason === 'device_limit') {
+    return res.json({
+      ok: true, valid: false, reason: 'device_limit',
+      expiresAt: lic.expiresAt, deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
+    });
+  }
+  return res.json({
+    ok: true, valid: true,
+    expiresAt: lic.expiresAt,
+    expiresAtISO: new Date(lic.expiresAt).toISOString(),
+    deviceCount: touch.deviceCount, maxDevices: lic.maxDevices
+  });
+});
+
+// ---------- API quản trị ----------
+function requireAdmin(req, res, next) {
+  if (!isAdmin(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
+  next();
+}
+
+app.post('/api/admin/login', sameOrigin, (req, res) => {
+  if (!ADMIN_PASSWORD) {
+    return res.status(500).json({ ok: false, error: 'admin_password_not_configured' });
+  }
+  const pw = typeof req.body?.password === 'string' ? req.body.password : '';
+  const a = Buffer.from(pw);
+  const b = Buffer.from(ADMIN_PASSWORD);
+  const match = a.length === b.length && crypto.timingSafeEqual(a, b);
+  if (!match) return res.status(401).json({ ok: false, error: 'wrong_password' });
+  issueAdminToken(res);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/logout', requireAdmin, (req, res) => {
+  const token = req.cookies?.admin_token;
+  if (token) adminTokens.delete(token);
+  res.clearCookie('admin_token', { path: '/' });
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
+  res.json({ ok: true, stats: db.stats() });
+});
+
+app.get('/api/admin/licenses', requireAdmin, (req, res) => {
+  res.json({ ok: true, licenses: db.listLicenses() });
+});
+
+app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
+  const days = Number(req.body?.days);
+  const maxDevices = Number(req.body?.maxDevices);
+  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : '';
+  const lic = makeLicense({
+    days: Number.isFinite(days) && days >= 1 && days <= 3650 ? Math.floor(days) : 30,
+    maxDevices: Number.isFinite(maxDevices) && maxDevices >= 1 && maxDevices <= 20 ? Math.floor(maxDevices) : 2,
+    note
+  });
+  const saved = db.createLicense({
+    keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
+    expiresAt: lic.expiresAt, maxDevices: lic.maxDevices
+  });
+  // Key gốc chỉ trả về 1 lần duy nhất lúc tạo — lưu lại ngay, không xem lại được.
+  res.json({ ok: true, key: lic.key, license: saved });
+});
+
+app.post('/api/admin/licenses/:id/revoke', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  const ok = db.revokeLicense(id, true);
+  res.json({ ok });
+});
+
+app.post('/api/admin/licenses/:id/restore', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  const ok = db.revokeLicense(id, false);
+  res.json({ ok });
+});
+
+app.delete('/api/admin/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  const ok = db.deleteLicense(id);
+  res.json({ ok });
+});
+
+app.listen(PORT, () => {
+  console.log(`[license-server] listening on :${PORT} (db: ${db.DB_PATH})`);
+  if (!ADMIN_PASSWORD) {
+    console.log('[license-server] WARNING: ADMIN_PASSWORD chưa đặt — /admin chưa đăng nhập được. Đặt biến môi trường ADMIN_PASSWORD.');
+  }
+});

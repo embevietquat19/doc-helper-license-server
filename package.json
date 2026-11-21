@@ -1,0 +1,10 @@
+{
+  "name": "doc-helper-license-server",
+  "version": "1.0.0",
+  "description": "License server cho Doc Helper — cấp key Tailieu.vn, kiểm tra key online (hết hạn / bị khóa / quá số thiết bị thì dừng).",
+  "private": true,
+  "type": "commonjs",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.22.3" }
+}
