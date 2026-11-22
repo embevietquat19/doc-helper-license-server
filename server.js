@@ -25,7 +25,12 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // — popup đọc file latest.json (bản mới + link tải GitHub Releases) để hiện
 // banner "Đã có bản mới" cho khách đang dùng bản cũ. File đọc 1 lần lúc
 // khởi động; đổi bản mới thì sửa latest.json rồi redeploy (hoặc restart).
-const VERSION = '1.3.2';
+// 1.3.3: thêm endpoint cho Blueberry ADS Block (GET /api/latest-blueberry,
+// file latest-blueberry.json) + phục vụ file ZIP tại /downloads/ để
+// popup của Blueberry tải bản mới. Cách phát hành bản Blueberry mới:
+// tăng version trong manifest → đóng ZIP → copy ZIP vào thư mục
+// downloads/ → sửa latest-blueberry.json → redeploy server.
+const VERSION = '1.3.3';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -160,6 +165,22 @@ app.get('/api/latest-extension', (req, res) => {
   if (!LATEST_EXTENSION) return res.status(404).json({ ok: false, error: 'no_update_info' });
   res.json({ ok: true, ...LATEST_EXTENSION });
 });
+// Bản Blueberry ADS Block mới nhất cho popup của Blueberry báo update
+// (file latest-blueberry.json ở cùng thư mục; ZIP bản mới nằm trong
+// thư mục downloads/ và được phục vụ tại /downloads/<file>.zip).
+let LATEST_BLUEBERRY = null;
+try {
+  const rawBb = require('node:fs').readFileSync(path.join(__dirname, 'latest-blueberry.json'), 'utf8');
+  const parsedBb = JSON.parse(rawBb);
+  if (parsedBb && typeof parsedBb.version === 'string' && typeof parsedBb.url === 'string') {
+    LATEST_BLUEBERRY = { version: parsedBb.version, url: parsedBb.url, notes: typeof parsedBb.notes === 'string' ? parsedBb.notes : '' };
+  }
+} catch (e) { LATEST_BLUEBERRY = null; }
+app.get('/api/latest-blueberry', (req, res) => {
+  if (!LATEST_BLUEBERRY) return res.status(404).json({ ok: false, error: 'no_update_info' });
+  res.json({ ok: true, ...LATEST_BLUEBERRY });
+});
+app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
