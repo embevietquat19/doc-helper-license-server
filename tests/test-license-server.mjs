@@ -292,12 +292,17 @@ check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
   check('HTTP verify rate-limit: email khác không bị chặn', vOther.status === 200);
 
   const health = await j('/');
-  check('HTTP health: version 1.3.2', health.status === 200 && health.data.version === '1.3.2');
+  check('HTTP health: version 1.3.3', health.status === 200 && health.data.version === '1.3.3');
   const latest = await j('/api/latest-extension');
   check('HTTP latest-extension: trả bản mới nhất 1.7.9 + link GitHub Releases',
     latest.status === 200 && latest.data.ok && latest.data.version === '1.7.9'
     && latest.data.url === 'https://github.com/embevietquat19/doc-helper/releases/download/v1.7.9/doc-helper-v1.7.9.zip'
     && typeof latest.data.notes === 'string' && latest.data.notes.length > 0);
+  const latestBb = await j('/api/latest-blueberry');
+  check('HTTP latest-blueberry: trả bản mới nhất 2.3.1 + link ZIP trên server',
+    latestBb.status === 200 && latestBb.data.ok && latestBb.data.version === '2.3.1'
+    && latestBb.data.url === 'https://license.digimar.site/downloads/blueberry-ads-block-v2.3.1.zip'
+    && typeof latestBb.data.notes === 'string' && latestBb.data.notes.length > 0);
 
   await new Promise((resolve) => srv.close(resolve));
 }
