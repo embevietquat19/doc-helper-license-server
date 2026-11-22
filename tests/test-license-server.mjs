@@ -299,9 +299,9 @@ check('db.stats sau xóa zalo: total 0', db.stats().total === 0);
     && latest.data.url === 'https://github.com/embevietquat19/doc-helper/releases/download/v1.7.9/doc-helper-v1.7.9.zip'
     && typeof latest.data.notes === 'string' && latest.data.notes.length > 0);
   const latestBb = await j('/api/latest-blueberry');
-  check('HTTP latest-blueberry: trả bản mới nhất 2.3.1 + link ZIP trên server',
-    latestBb.status === 200 && latestBb.data.ok && latestBb.data.version === '2.3.1'
-    && latestBb.data.url === 'https://license.digimar.site/downloads/blueberry-ads-block-v2.3.1.zip'
+  check('HTTP latest-blueberry: trả bản mới nhất 2.4.0 + link ZIP trên server',
+    latestBb.status === 200 && latestBb.data.ok && latestBb.data.version === '2.4.0'
+    && latestBb.data.url === 'https://license.digimar.site/downloads/blueberry-ads-block-v2.4.0.zip'
     && typeof latestBb.data.notes === 'string' && latestBb.data.notes.length > 0);
 
   await new Promise((resolve) => srv.close(resolve));
