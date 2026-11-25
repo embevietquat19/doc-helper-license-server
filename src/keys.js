@@ -116,4 +116,23 @@ function makeEmailLicense({ days = 30, note = '', maxDevices = 2, email = '' } =
   };
 }
 
-module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, UNLIMITED_EXPIRES_AT, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices };
+
+// --- Blueberry Flow (server 1.4.0) ---
+// Gói đã chốt: Free 30 lượt/tháng, Pro 300 lượt/tháng, VIP không giới hạn.
+// monthlyQuota null = không giới hạn (VIP). 1 lượt = 1 đơn vị quota;
+// video tính 5 đơn vị (phía extension gửi units=5 khi consume).
+const FLOW_PLANS = { free: 30, pro: 300, vip: null };
+function isValidFlowPlan(plan) {
+  return plan === 'free' || plan === 'pro' || plan === 'vip';
+}
+// License Flow theo email (giống makeEmailLicense của Doc Helper, thêm
+// product='blueberry-flow' + plan + monthlyQuota). days=0 → không hết hạn.
+function makeFlowEmailLicense({ days = 30, note = '', maxDevices = 0, email = '', plan = 'free', monthlyQuota } = {}) {
+  const base = makeEmailLicense({ days, note, maxDevices, email });
+  const quota = monthlyQuota !== undefined && monthlyQuota !== null
+    ? monthlyQuota
+    : FLOW_PLANS[plan];
+  return { ...base, product: 'blueberry-flow', plan, monthlyQuota: quota };
+}
+
+module.exports = { generateKey, normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, UNLIMITED_EXPIRES_AT, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices, FLOW_PLANS, isValidFlowPlan, makeFlowEmailLicense };
