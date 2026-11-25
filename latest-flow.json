@@ -1,0 +1,1 @@
+{"notes":"Sửa lỗi kẹt hàng đợi: batch enqueue ngay sau batch trước vẫn tự chạy (v0.2.0 kẹt ở queued). Chạy được bằng API mode (OpenAI / xAI / Anthropic / Gemini) + Mock test không tốn credit, giấy phép Free 30 / Pro 300 / VIP không giới hạn lượt/tháng.","url":"https://license.digimar.site/downloads/blueberry-flow-v0.2.1.zip","version":"0.2.1"}

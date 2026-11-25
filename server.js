@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.3.2 — server.js
+// Doc Helper License Server 1.4.0 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
@@ -11,12 +11,19 @@
 // Zalo, ghi chú, hạn dùng, số thiết bị tối đa; lúc tạo cũng nhập được số
 // Zalo); đăng nhập quản trị có rate-limit (mặc định 10 lần / 10 phút / IP)
 // để mật khẩu yếu khó bị dò.
+// 1.4.0: TÁCH THEO PRODUCT — thêm Blueberry Flow (xem README_SERVER.md):
+// DB thêm product/plan/monthly_quota/used_this_month/month_key + bảng
+// flow_usage; endpoint riêng POST /api/flow/verify, POST /api/flow/consume,
+// GET /api/latest-flow, GET /api/flow/stats + CRUD admin
+// /api/admin/flow/licenses (chỉ product='blueberry-flow'); /api/verify cũ
+// giờ chỉ tìm product='doc-helper' nên license Flow không verify được ở
+// đó và ngược lại. Endpoint cũ của Doc Helper + Blueberry giữ nguyên.
 'use strict';
 const crypto = require('node:crypto');
 const express = require('express');
 const path = require('node:path');
 const db = require('./src/db');
-const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices, UNLIMITED_EXPIRES_AT } = require('./src/keys');
+const { normalizeKey, isValidKeyFormat, hashKey, makeLicense, normalizeEmail, isValidEmail, makeEmailLicense, isUnlimitedExpiry, daysRemaining, isUnlimitedDevices, UNLIMITED_EXPIRES_AT, FLOW_PLANS, isValidFlowPlan, makeFlowEmailLicense } = require('./src/keys');
 
 const PORT = process.env.PORT || 3001;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -30,7 +37,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // popup của Blueberry tải bản mới. Cách phát hành bản Blueberry mới:
 // tăng version trong manifest → đóng ZIP → copy ZIP vào thư mục
 // downloads/ → sửa latest-blueberry.json → redeploy server.
-const VERSION = '1.3.3';
+const VERSION = '1.4.0';
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -147,6 +154,38 @@ function verifyRateLimit(req, res, next) {
   next();
 }
 
+// ---------- Rate-limit cho /api/flow/consume ----------
+// Consume gọi theo từng task (1 batch có thể là hàng chục task trong vài
+// phút) nên giới hạn nới hơn verify: 300 lần / 10 phút / chứng chỉ
+// (đủ cho gói Pro 300/tháng chạy dồn 1 batch), 600 lần / 10 phút / IP.
+const FLOW_CONSUME_RATE_LIMIT_MAX = Number(process.env.FLOW_CONSUME_RATE_LIMIT_MAX) || 300;
+const FLOW_CONSUME_RATE_LIMIT_WINDOW_MS = Number(process.env.FLOW_CONSUME_RATE_LIMIT_WINDOW_MS) || 10 * 60 * 1000;
+const flowConsumeCredHits = new Map();
+const flowConsumeIpHits = new Map();
+function flowConsumeRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = FLOW_CONSUME_RATE_LIMIT_WINDOW_MS;
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  const rawKey = typeof req.body?.key === 'string' ? req.body.key : '';
+  let credKey = 'anon:' + ip;
+  if (isValidEmail(rawEmail)) credKey = 'email:' + normalizeEmail(rawEmail);
+  else if (isValidKeyFormat(rawKey)) credKey = 'key:' + hashKey(normalizeKey(rawKey));
+  const credList = (flowConsumeCredHits.get(credKey) || []).filter((t) => now - t < windowMs);
+  if (credList.length >= FLOW_CONSUME_RATE_LIMIT_MAX) {
+    return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: Math.ceil(windowMs / 1000) });
+  }
+  credList.push(now);
+  flowConsumeCredHits.set(credKey, credList);
+  const list = (flowConsumeIpHits.get(ip) || []).filter((t) => now - t < windowMs);
+  if (list.length >= 600) {
+    return res.status(429).json({ ok: false, error: 'rate_limited', retryAfterSeconds: 600 });
+  }
+  list.push(now);
+  flowConsumeIpHits.set(ip, list);
+  next();
+}
+
 // ---------- Trang trạng thái + trang quản trị ----------
 app.get('/', (req, res) => {
   res.json({ ok: true, service: 'doc-helper-license', version: VERSION });
@@ -180,6 +219,23 @@ app.get('/api/latest-blueberry', (req, res) => {
   if (!LATEST_BLUEBERRY) return res.status(404).json({ ok: false, error: 'no_update_info' });
   res.json({ ok: true, ...LATEST_BLUEBERRY });
 });
+// 1.4.0: bản Blueberry Flow mới nhất (file latest-flow.json ở cùng thư
+// mục; ZIP bản mới nằm trong thư mục downloads/, phục vụ tại
+// /downloads/<file>.zip). Cách phát hành giống Blueberry: tăng version
+// trong manifest → đóng ZIP → copy ZIP vào downloads/ → sửa
+// latest-flow.json → redeploy server.
+let LATEST_FLOW = null;
+try {
+  const rawFlow = require('node:fs').readFileSync(path.join(__dirname, 'latest-flow.json'), 'utf8');
+  const parsedFlow = JSON.parse(rawFlow);
+  if (parsedFlow && typeof parsedFlow.version === 'string' && typeof parsedFlow.url === 'string') {
+    LATEST_FLOW = { version: parsedFlow.version, url: parsedFlow.url, notes: typeof parsedFlow.notes === 'string' ? parsedFlow.notes : '' };
+  }
+} catch (e) { LATEST_FLOW = null; }
+app.get('/api/latest-flow', (req, res) => {
+  if (!LATEST_FLOW) return res.status(404).json({ ok: false, error: 'no_update_info' });
+  res.json({ ok: true, ...LATEST_FLOW });
+});
 app.use('/downloads', express.static(path.join(__dirname, 'downloads')));
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
@@ -200,12 +256,13 @@ app.post('/api/verify', verifyRateLimit, (req, res) => {
   }
   let lic = null;
   let type = null;
+  // 1.4.0: /api/verify chỉ phục vụ Doc Helper — tìm đúng product.
   if (isValidEmail(rawEmail)) {
-    lic = db.findLicenseByEmail(normalizeEmail(rawEmail));
+    lic = db.findLicenseByEmail(normalizeEmail(rawEmail), 'doc-helper');
     type = 'email';
   } else if (isValidKeyFormat(rawKey)) {
     const key = normalizeKey(rawKey);
-    lic = db.findLicenseByHash(hashKey(key));
+    lic = db.findLicenseByHash(hashKey(key), 'doc-helper');
     type = 'key';
   }
   if (!lic) return res.json({ ok: true, valid: false, reason: 'invalid' });
@@ -238,6 +295,74 @@ app.post('/api/verify', verifyRateLimit, (req, res) => {
   });
 });
 
+// ---------- API công khai: Blueberry Flow (1.4.0) ----------
+// TÌM LICENSE FLOW THEO EMAIL HOẶC KEY — CHỈ product='blueberry-flow'.
+// License Doc Helper (cùng email) KHÔNG verify được ở đây và ngược lại.
+// Body: { key, deviceId } hoặc { email, deviceId } — email ưu tiên.
+// Trả: { ok, valid, reason?, plan, expiresAt, daysRemaining,
+//        monthlyQuota (null = VIP không giới hạn), usedThisMonth,
+//        remaining (null = không giới hạn), monthKey }
+function findFlowLicense(req) {
+  const rawKey = typeof req.body?.key === 'string' ? req.body.key : '';
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  if (isValidEmail(rawEmail)) return { lic: db.findLicenseByEmail(normalizeEmail(rawEmail), 'blueberry-flow'), type: 'email' };
+  if (isValidKeyFormat(rawKey)) return { lic: db.findLicenseByHash(hashKey(normalizeKey(rawKey)), 'blueberry-flow'), type: 'key' };
+  return { lic: null, type: null };
+}
+function flowLicensePayload(lic, type) {
+  const quota = lic.monthlyQuota; // null = VIP không giới hạn
+  const remaining = quota === null ? null : Math.max(0, quota - lic.usedThisMonth);
+  return {
+    ok: true, valid: true, type,
+    plan: lic.plan || 'free',
+    expiresAt: isUnlimitedExpiry(lic.expiresAt) ? null : lic.expiresAt,
+    expiresAtISO: isUnlimitedExpiry(lic.expiresAt) ? null : new Date(lic.expiresAt).toISOString(),
+    daysRemaining: daysRemaining(lic.expiresAt),
+    unlimitedTime: isUnlimitedExpiry(lic.expiresAt),
+    monthlyQuota: quota,
+    usedThisMonth: lic.usedThisMonth,
+    remaining,
+    monthKey: lic.monthKey
+  };
+}
+function cleanDeviceId(req) {
+  const d = typeof req.body?.deviceId === 'string' ? req.body.deviceId : '';
+  return d.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+}
+
+app.post('/api/flow/verify', verifyRateLimit, (req, res) => {
+  const { lic, type } = findFlowLicense(req);
+  if (!lic) return res.json({ ok: true, valid: false, reason: 'invalid' });
+  if (lic.revoked) return res.json({ ok: true, valid: false, reason: 'revoked', expiresAt: lic.expiresAt, plan: lic.plan });
+  if (lic.expiresAt <= Date.now()) return res.json({ ok: true, valid: false, reason: 'expired', expiresAt: lic.expiresAt, plan: lic.plan });
+  const deviceId = cleanDeviceId(req);
+  if (deviceId) db.touchDeviceByLicenseId(lic.id, deviceId);
+  const quota = lic.monthlyQuota;
+  if (quota !== null && lic.usedThisMonth >= quota) {
+    return res.json({ ok: true, valid: false, reason: 'quota_exceeded', plan: lic.plan, monthlyQuota: quota, usedThisMonth: lic.usedThisMonth, remaining: 0, monthKey: lic.monthKey });
+  }
+  return res.json(flowLicensePayload(lic, type));
+});
+
+// Trừ quota: body { key|email, deviceId, units (1 text/ảnh, 5 video),
+// kind ('text'|'image'|'video') }. Trừ xong mới tính tiền — extension
+// gọi SAU MỖI TASK HOÀN THÀNH, không gọi trước khi chạy.
+app.post('/api/flow/consume', flowConsumeRateLimit, (req, res) => {
+  const { lic } = findFlowLicense(req);
+  if (!lic) return res.json({ ok: true, valid: false, reason: 'invalid' });
+  const units = Number(req.body?.units);
+  if (!Number.isFinite(units) || units < 1 || units > 5) {
+    return res.status(400).json({ ok: false, error: 'bad_units' });
+  }
+  const kind = typeof req.body?.kind === 'string' ? req.body.kind.slice(0, 20) : '';
+  const deviceId = cleanDeviceId(req);
+  const result = db.consumeFlowQuota(lic.id, Math.floor(units), deviceId, kind);
+  if (!result.ok) {
+    return res.json({ ok: true, valid: false, reason: result.reason, plan: lic.plan, monthlyQuota: lic.monthlyQuota, usedThisMonth: result.license ? result.license.usedThisMonth : lic.usedThisMonth, remaining: result.remaining !== undefined ? result.remaining : null, monthKey: lic.monthKey });
+  }
+  return res.json({ ok: true, valid: true, plan: result.license.plan, monthlyQuota: result.license.monthlyQuota, usedThisMonth: result.license.usedThisMonth, remaining: result.remaining, monthKey: result.license.monthKey });
+});
+
 // ---------- API quản trị ----------
 function requireAdmin(req, res, next) {
   if (!isAdmin(req)) return res.status(401).json({ ok: false, error: 'unauthorized' });
@@ -265,11 +390,13 @@ app.post('/api/admin/logout', requireAdmin, (req, res) => {
 });
 
 app.get('/api/admin/stats', requireAdmin, (req, res) => {
-  res.json({ ok: true, stats: db.stats() });
+  const product = typeof req.query.product === 'string' && req.query.product ? req.query.product : undefined;
+  res.json({ ok: true, stats: db.stats(product) });
 });
 
 app.get('/api/admin/licenses', requireAdmin, (req, res) => {
-  res.json({ ok: true, licenses: db.listLicenses() });
+  const product = typeof req.query.product === 'string' && req.query.product ? req.query.product : undefined;
+  res.json({ ok: true, licenses: db.listLicenses(product) });
 });
 
 app.post('/api/admin/licenses', requireAdmin, sameOrigin, (req, res) => {
@@ -385,6 +512,123 @@ app.delete('/api/admin/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
   if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
   const ok = db.deleteLicense(id);
   res.json({ ok });
+});
+
+// ---------- API quản trị: Blueberry Flow (1.4.0) ----------
+// Tất cả endpoint dưới đây CHỈ chạm product='blueberry-flow'.
+// Tạo license Flow: body { email (bắt buộc), plan ('free'|'pro'|'vip',
+// mặc định 'free'), days (mặc định 30, 0 = không hết hạn),
+// monthlyQuota (ghi đè gói — vd Pro tặng 500), note, zalo }.
+// Email đã có license Flow thì 409 (email_exists) — cùng email vẫn có thể
+// có license Doc Helper riêng, không ảnh hưởng.
+app.get('/api/flow/stats', requireAdmin, (req, res) => {
+  res.json({ ok: true, stats: db.flowStats() });
+});
+
+app.get('/api/admin/flow/licenses', requireAdmin, (req, res) => {
+  const plan = typeof req.query.plan === 'string' && req.query.plan ? req.query.plan : undefined;
+  let list = db.listLicenses('blueberry-flow');
+  if (plan) list = list.filter((l) => l.plan === plan);
+  res.json({ ok: true, licenses: list });
+});
+
+app.post('/api/admin/flow/licenses', requireAdmin, sameOrigin, (req, res) => {
+  const rawEmail = typeof req.body?.email === 'string' ? req.body.email : '';
+  if (!isValidEmail(rawEmail)) return res.status(400).json({ ok: false, error: 'bad_email' });
+  const email = normalizeEmail(rawEmail);
+  const plan = typeof req.body?.plan === 'string' ? req.body.plan.toLowerCase() : 'free';
+  if (!isValidFlowPlan(plan)) return res.status(400).json({ ok: false, error: 'bad_plan' });
+  const days = Number(req.body?.days);
+  const optsDays = Number.isFinite(days) && days >= 0 && days <= 3650 ? Math.floor(days) : 30;
+  const zalo = sanitizeZalo(req.body?.zalo);
+  if (zalo === null) return res.status(400).json({ ok: false, error: 'bad_zalo' });
+  const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 200) : '';
+  let quota = null;
+  if (req.body?.monthlyQuota !== undefined && req.body?.monthlyQuota !== null && req.body?.monthlyQuota !== '') {
+    const q = Number(req.body.monthlyQuota);
+    if (!Number.isFinite(q) || q < 0 || q > 100000) return res.status(400).json({ ok: false, error: 'bad_quota' });
+    quota = Math.floor(q);
+  }
+  const existing = db.findLicenseByEmail(email, 'blueberry-flow');
+  if (existing) return res.status(409).json({ ok: false, error: 'email_exists', license: existing });
+  const lic = makeFlowEmailLicense({ days: optsDays, note, maxDevices: 0, email, plan, monthlyQuota: quota });
+  const saved = db.createLicense({
+    keyHash: lic.keyHash, prefix: lic.prefix, note: lic.note,
+    expiresAt: lic.expiresAt, maxDevices: lic.maxDevices, email: lic.email, zalo,
+    product: 'blueberry-flow', plan: lic.plan, monthlyQuota: lic.monthlyQuota
+  });
+  res.json({ ok: true, email: saved.email, license: saved });
+});
+
+app.patch('/api/admin/flow/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  const lic = db.findFlowLicenseById(id);
+  if (!lic) return res.status(404).json({ ok: false, error: 'not_found' });
+  const patch = {};
+  if (req.body?.zalo !== undefined) {
+    const z = sanitizeZalo(req.body.zalo);
+    if (z === null) return res.status(400).json({ ok: false, error: 'bad_zalo' });
+    patch.zalo = z;
+  }
+  if (typeof req.body?.note === 'string') patch.note = req.body.note.slice(0, 200);
+  if (typeof req.body?.plan === 'string') {
+    if (!isValidFlowPlan(req.body.plan.toLowerCase())) return res.status(400).json({ ok: false, error: 'bad_plan' });
+    patch.plan = req.body.plan.toLowerCase();
+  }
+  if (req.body?.monthlyQuota !== undefined) {
+    if (req.body.monthlyQuota === null || req.body.monthlyQuota === '') patch.monthlyQuota = null;
+    else {
+      const q = Number(req.body.monthlyQuota);
+      if (!Number.isFinite(q) || q < 0 || q > 100000) return res.status(400).json({ ok: false, error: 'bad_quota' });
+      patch.monthlyQuota = Math.floor(q);
+    }
+  }
+  if (req.body?.usedThisMonth !== undefined) {
+    const u = Number(req.body.usedThisMonth);
+    if (!Number.isFinite(u) || u < 0 || u > 100000) return res.status(400).json({ ok: false, error: 'bad_used' });
+    patch.usedThisMonth = Math.floor(u);
+  }
+  if (req.body?.unlimitedTime === true) {
+    patch.expiresAt = UNLIMITED_EXPIRES_AT;
+  } else if (typeof req.body?.expiresAtISO === 'string' && req.body.expiresAtISO) {
+    const ms = Date.parse(req.body.expiresAtISO + 'T23:59:59.999+07:00');
+    if (!Number.isFinite(ms)) return res.status(400).json({ ok: false, error: 'bad_expiry' });
+    patch.expiresAt = ms;
+  } else if (req.body?.days !== undefined) {
+    const d = Number(req.body.days);
+    if (!Number.isFinite(d) || d < 0 || d > 3650) return res.status(400).json({ ok: false, error: 'bad_days' });
+    patch.expiresAt = d === 0 ? UNLIMITED_EXPIRES_AT : Date.now() + Math.floor(d) * 24 * 60 * 60 * 1000;
+  }
+  const updated = db.updateLicense(id, patch);
+  res.json({ ok: true, license: updated });
+});
+
+app.post('/api/admin/flow/licenses/:id/revoke', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  if (!db.findFlowLicenseById(id)) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: db.revokeLicense(id, true) });
+});
+
+app.post('/api/admin/flow/licenses/:id/restore', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  if (!db.findFlowLicenseById(id)) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: db.revokeLicense(id, false) });
+});
+
+app.delete('/api/admin/flow/licenses/:id', requireAdmin, sameOrigin, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+  if (!db.findFlowLicenseById(id)) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: db.deleteLicense(id) });
+});
+
+app.get('/api/admin/flow/usage', requireAdmin, (req, res) => {
+  const licenseId = req.query.licenseId ? Number(req.query.licenseId) : null;
+  const limit = req.query.limit ? Number(req.query.limit) : 100;
+  res.json({ ok: true, usage: db.listFlowUsage(Number.isFinite(licenseId) ? licenseId : null, limit) });
 });
 
 // Chỉ lắng nghe khi chạy trực tiếp (node server.js). Khi được require
