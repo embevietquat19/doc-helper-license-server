@@ -62,10 +62,6 @@ db.exec(`
     kind TEXT DEFAULT '',
     created_at INTEGER NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_licenses_expires ON licenses(expires_at);
-  CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product);
-  CREATE INDEX IF NOT EXISTS idx_licenses_email_product ON licenses(email, product);
-  CREATE INDEX IF NOT EXISTS idx_flow_usage_license ON flow_usage(license_id);
 `);
 // DB cũ (tạo trước 1.1.0) chưa có cột email — thêm vào, đã có thì bỏ qua.
 try { db.exec(`ALTER TABLE licenses ADD COLUMN email TEXT DEFAULT ''`); } catch (e) { /* cột đã có */ }
@@ -77,6 +73,16 @@ try { db.exec(`ALTER TABLE licenses ADD COLUMN plan TEXT DEFAULT ''`); } catch (
 try { db.exec(`ALTER TABLE licenses ADD COLUMN monthly_quota INTEGER`); } catch (e) { /* cột đã có */ }
 try { db.exec(`ALTER TABLE licenses ADD COLUMN used_this_month INTEGER NOT NULL DEFAULT 0`); } catch (e) { /* cột đã có */ }
 try { db.exec(`ALTER TABLE licenses ADD COLUMN month_key TEXT DEFAULT ''`); } catch (e) { /* cột đã có */ }
+// Index — PHẢI chạy SAU các ALTER ở trên. Trước đây index trên cột
+// product chạy trước khi cột được thêm, nên DB cũ (chưa có cột product)
+// crash ngay lúc load với "no such column: product" — đó là lỗi làm
+// server live 1.4.0 sập vòng lặp 503 ngày 25/11/2026.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_licenses_expires ON licenses(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product);
+  CREATE INDEX IF NOT EXISTS idx_licenses_email_product ON licenses(email, product);
+  CREATE INDEX IF NOT EXISTS idx_flow_usage_license ON flow_usage(license_id);
+`);
 // DB cũ chưa có bảng flow_usage — CREATE TABLE IF NOT EXISTS ở trên đã lo.
 
 function rowToLicense(r) {
