@@ -1,4 +1,4 @@
-// Blueberry Flow — tests/test-flow-server.mjs (server v1.4.0)
+// Blueberry Flow — tests/test-flow-server.mjs (server v1.5.0)
 // Kiểm chứng qua HTTP thật: verify / consume / quota / hết hạn / revoke /
 // tách product (Doc Helper <> Flow) / latest-flow / admin Flow CRUD / log.
 // Dùng DATA_DIR tạm — không chạm DB thật, không deploy gì.
@@ -38,9 +38,9 @@ const createFlow = (body) => j('/api/admin/flow/licenses', { ...auth, method: 'P
 
 // ---------- health + latest-flow ----------
 const health = await j('/');
-check('health: version 1.4.0', health.status === 200 && health.data.version === '1.4.0', health.data);
+check('health: version 1.5.0', health.status === 200 && health.data.version === '1.5.0', health.data);
 const latest = await j('/api/latest-flow');
-check('latest-flow: version 0.2.1 + url', latest.status === 200 && latest.data.ok && latest.data.version === '0.2.1' && latest.data.url.includes('blueberry-flow'), latest.data);
+check('latest-flow: version 0.2.3 + url', latest.status === 200 && latest.data.ok && latest.data.version === '0.2.3' && latest.data.url.includes('blueberry-flow'), latest.data);
 
 // ---------- tạo + verify Free 30 ----------
 const c1 = await createFlow({ email: 'flow-free@example.com', plan: 'free', days: 30, note: 'test free' });
