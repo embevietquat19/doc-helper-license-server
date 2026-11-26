@@ -1,7 +1,7 @@
 {
   "name": "doc-helper-license-server",
-  "version": "1.4.0",
-  "description": "License server cho Doc Helper + Blueberry ADS Block + Blueberry Flow — tách theo product, quota tháng cho Flow.",
+  "version": "1.5.0",
+  "description": "License server cho Doc Helper + Blueberry ADS Block + Blueberry Flow — tách theo product, quota tháng cho Flow, hàng đợi Muse (v1.5.0).",
   "private": true,
   "type": "commonjs",
   "engines": {

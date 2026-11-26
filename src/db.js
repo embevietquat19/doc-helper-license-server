@@ -1,5 +1,11 @@
-// Doc Helper License Server 1.4.0 — src/db.js
-// (v1.4.0 = 1.3.3 + Blueberry Flow, tách theo product — xem README_SERVER.md)
+// Doc Helper License Server 1.5.0 — src/db.js
+// (v1.5.0 = 1.4.0 + hàng đợi Muse cho Blueberry Flow v0.2.3 — xem README_SERVER.md)
+// Từ 1.5.0: bảng muse_tasks — extension giao việc cho Muse qua server
+// (POST /api/flow/muse-tasks), Muse phía chat poll ?status=pending rồi
+// trả kết quả về (POST .../result), extension poll GET /:id lấy kết quả.
+// Không có auth riêng cho queue này (theo thiết kế v0.2.3): id là chuỗi
+// ngẫu nhiên không đoán được; chỉ dùng cho tài khoản của user, theo dõi
+// qua bảng admin sau khi deploy.
 // SQLite qua node:sqlite (có sẵn từ Node 22+, không cần gói native).
 // Lưu key dạng HASH SHA-256 (không lưu key gốc — lộ DB cũng không dùng được
 // key). Mỗi key: hạn dùng, trạng thái, số thiết bị tối đa, ghi chú.
@@ -62,6 +68,20 @@ db.exec(`
     kind TEXT DEFAULT '',
     created_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS muse_tasks (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    workflow_id TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    device_id TEXT DEFAULT '',
+    prompt TEXT NOT NULL,
+    upstream_text TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    result_text TEXT DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER
+  );
 `);
 // DB cũ (tạo trước 1.1.0) chưa có cột email — thêm vào, đã có thì bỏ qua.
 try { db.exec(`ALTER TABLE licenses ADD COLUMN email TEXT DEFAULT ''`); } catch (e) { /* cột đã có */ }
@@ -82,8 +102,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product);
   CREATE INDEX IF NOT EXISTS idx_licenses_email_product ON licenses(email, product);
   CREATE INDEX IF NOT EXISTS idx_flow_usage_license ON flow_usage(license_id);
+  CREATE INDEX IF NOT EXISTS idx_muse_tasks_status ON muse_tasks(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_muse_tasks_task ON muse_tasks(task_id);
 `);
 // DB cũ chưa có bảng flow_usage — CREATE TABLE IF NOT EXISTS ở trên đã lo.
+
+function museTaskRow(r) {
+  if (!r) return null;
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    workflowId: r.workflow_id || '',
+    email: r.email || '',
+    deviceId: r.device_id || '',
+    prompt: r.prompt || '',
+    upstreamText: r.upstream_text || '',
+    status: r.status || 'pending',
+    resultText: r.result_text || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    completedAt: r.completed_at || null,
+  };
+}
 
 function rowToLicense(r) {
   if (!r) return null;
@@ -294,6 +334,53 @@ module.exports = {
       `SELECT COALESCE(SUM(units),0) AS units, COUNT(*) AS runs FROM flow_usage WHERE created_at >= ?`
     ).get(Date.now() - 30 * 24 * 60 * 60 * 1000);
     return { monthKey: mk, byPlan, monthUsage };
+  },
+  // ---- Hàng đợi Muse (1.5.0, Blueberry Flow v0.2.3) ----
+  // id: chuỗi ngẫu nhiên 'mt_...' do server cấp (không đoán được).
+  // task_id: id task trong extension (dùng để idempotency: POST lại cùng
+  // task_id khi task còn pending thì trả về bản cũ, không tạo trùng).
+  // status: 'pending' | 'done' | 'failed'. result_text chỉ có khi done.
+  createMuseTask({ id, taskId, workflowId, email, deviceId, prompt, upstreamText }) {
+    const now = Date.now();
+    db.prepare(
+      'INSERT INTO muse_tasks (id, task_id, workflow_id, email, device_id, prompt, upstream_text, status, result_text, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)'
+    ).run(id, taskId, workflowId || '', email || '', deviceId || '', prompt, upstreamText || '', 'pending', '', now, now);
+    return this.getMuseTask(id);
+  },
+  getMuseTask(id) {
+    const r = db.prepare('SELECT * FROM muse_tasks WHERE id = ?').get(id);
+    return r ? museTaskRow(r) : null;
+  },
+  findPendingMuseTaskByTaskId(taskId) {
+    const r = db.prepare(
+      "SELECT * FROM muse_tasks WHERE task_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1"
+    ).get(taskId);
+    return r ? museTaskRow(r) : null;
+  },
+  listMuseTasks(status, limit) {
+    const n = Number.isFinite(limit) && limit > 0 && limit <= 500 ? Math.floor(limit) : 100;
+    const rows = status
+      ? db.prepare('SELECT * FROM muse_tasks WHERE status = ? ORDER BY created_at ASC LIMIT ?').all(status, n)
+      : db.prepare('SELECT * FROM muse_tasks ORDER BY created_at DESC LIMIT ?').all(n);
+    return rows.map(museTaskRow);
+  },
+  // Chỉ task pending mới nhận kết quả. Trả { ok:true, task } hoặc
+  // { ok:false, reason:'not_found'|'already_done' }.
+  completeMuseTask(id, resultText) {
+    const row = db.prepare('SELECT * FROM muse_tasks WHERE id = ?').get(id);
+    if (!row) return { ok: false, reason: 'not_found' };
+    if (row.status !== 'pending') return { ok: false, reason: 'already_done', task: museTaskRow(row) };
+    const now = Date.now();
+    db.prepare(
+      "UPDATE muse_tasks SET status = 'done', result_text = ?, updated_at = ?, completed_at = ? WHERE id = ?"
+    ).run(resultText, now, now, id);
+    return { ok: true, task: this.getMuseTask(id) };
+  },
+  countMuseTasksByStatus() {
+    const rows = db.prepare('SELECT status, COUNT(*) AS n FROM muse_tasks GROUP BY status').all();
+    const out = { pending: 0, done: 0, failed: 0 };
+    rows.forEach((r) => { out[r.status] = r.n; });
+    return out;
   },
   currentMonthKey,
   rollMonthIfNeeded

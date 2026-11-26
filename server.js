@@ -1,4 +1,4 @@
-// Doc Helper License Server 1.4.0 — server.js
+// Doc Helper License Server 1.5.0 — server.js
 // Express + SQLite (node:sqlite). Chạy: npm install && npm start.
 // Deploy: Hostinger Business, Web App Node.js 24, Application root là thư
 // mục gốc repo (xem README_DEPLOY.md).
@@ -11,6 +11,11 @@
 // Zalo, ghi chú, hạn dùng, số thiết bị tối đa; lúc tạo cũng nhập được số
 // Zalo); đăng nhập quản trị có rate-limit (mặc định 10 lần / 10 phút / IP)
 // để mật khẩu yếu khó bị dò.
+// 1.5.0: HÀNG ĐỢI MUSE cho Blueberry Flow v0.2.3 (xem README_SERVER.md):
+// bảng muse_tasks + POST /api/flow/muse-tasks, GET /api/flow/muse-tasks/:id,
+// GET /api/flow/muse-tasks?status=pending, POST /api/flow/muse-tasks/:id/result.
+// Endpoint license cũ (verify/consume) không đổi. CHƯA DEPLOY — chỉ code +
+// test local, deploy sau khi user duyệt.
 // 1.4.0: TÁCH THEO PRODUCT — thêm Blueberry Flow (xem README_SERVER.md):
 // DB thêm product/plan/monthly_quota/used_this_month/month_key + bảng
 // flow_usage; endpoint riêng POST /api/flow/verify, POST /api/flow/consume,
@@ -37,10 +42,10 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // popup của Blueberry tải bản mới. Cách phát hành bản Blueberry mới:
 // tăng version trong manifest → đóng ZIP → copy ZIP vào thư mục
 // downloads/ → sửa latest-blueberry.json → redeploy server.
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 const app = express();
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '512kb' })); // 512kb: kết quả Muse trả về có thể dài (prompt + upstream + bài trả lời)
 app.disable('x-powered-by');
 // Hostinger chạy app sau 1 reverse proxy: tin proxy để req.ip là IP thật
 // của khách (không có dòng này, mọi request đều mang IP của proxy và
@@ -361,6 +366,69 @@ app.post('/api/flow/consume', flowConsumeRateLimit, (req, res) => {
     return res.json({ ok: true, valid: false, reason: result.reason, plan: lic.plan, monthlyQuota: lic.monthlyQuota, usedThisMonth: result.license ? result.license.usedThisMonth : lic.usedThisMonth, remaining: result.remaining !== undefined ? result.remaining : null, monthKey: lic.monthKey });
   }
   return res.json({ ok: true, valid: true, plan: result.license.plan, monthlyQuota: result.license.monthlyQuota, usedThisMonth: result.license.usedThisMonth, remaining: result.remaining, monthKey: result.license.monthKey });
+});
+
+// ---------- Hàng đợi Muse (1.5.0, Blueberry Flow v0.2.3) ----------
+// Luồng đồng bộ: extension giao việc -> POST /api/flow/muse-tasks (pending)
+// -> Muse phía chat poll GET /api/flow/muse-tasks?status=pending, làm xong
+// -> POST /api/flow/muse-tasks/:id/result -> extension poll GET /:id thấy
+// done và lấy resultText về làm kết quả task, chuyền downstream như node
+// thường. Extension poll mỗi 10s, hết 10 phút chưa có kết quả thì tự
+// chuyển sang fallback paste-back (không chờ server nữa).
+// LƯU Ý BẢO MẬT: queue này không có auth riêng (theo thiết kế v0.2.3) —
+// id là chuỗi ngẫu nhiên không đoán được, chỉ dùng cho tài khoản của user.
+// Không dùng để nhận việc từ người lạ; sau khi deploy cần theo dõi bảng
+// muse_tasks trên /admin.
+function museTaskId() {
+  return 'mt_' + Date.now().toString(36) + crypto.randomBytes(8).toString('hex');
+}
+function cleanMuseStr(v, max) {
+  return typeof v === 'string' ? v.slice(0, max) : '';
+}
+app.post('/api/flow/muse-tasks', (req, res) => {
+  const taskId = cleanMuseStr(req.body?.taskId, 128);
+  const prompt = cleanMuseStr(req.body?.prompt, 20000);
+  if (!taskId || !prompt.trim()) {
+    return res.status(400).json({ ok: false, error: 'bad_task', detail: 'taskId và prompt (không rỗng) là bắt buộc' });
+  }
+  // Idempotency: giao lại cùng taskId khi còn pending -> trả bản cũ.
+  const existing = db.findPendingMuseTaskByTaskId(taskId);
+  if (existing) return res.json({ ok: true, ...existing, deduped: true });
+  const task = db.createMuseTask({
+    id: museTaskId(),
+    taskId,
+    workflowId: cleanMuseStr(req.body?.workflowId, 128),
+    email: cleanMuseStr(req.body?.email, 200),
+    deviceId: cleanDeviceId(req),
+    prompt,
+    upstreamText: cleanMuseStr(req.body?.upstreamText, 20000),
+  });
+  res.json({ ok: true, ...task });
+});
+app.get('/api/flow/muse-tasks/:id', (req, res) => {
+  const task = db.getMuseTask(String(req.params.id || '').slice(0, 128));
+  if (!task) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: true, ...task });
+});
+app.get('/api/flow/muse-tasks', (req, res) => {
+  const status = typeof req.query.status === 'string' ? req.query.status.slice(0, 20) : '';
+  if (status && status !== 'pending' && status !== 'done' && status !== 'failed') {
+    return res.status(400).json({ ok: false, error: 'bad_status' });
+  }
+  const limit = req.query.limit ? Number(req.query.limit) : 100;
+  res.json({ ok: true, tasks: db.listMuseTasks(status || null, limit), counts: db.countMuseTasksByStatus() });
+});
+app.post('/api/flow/muse-tasks/:id/result', (req, res) => {
+  const id = String(req.params.id || '').slice(0, 128);
+  const resultText = typeof req.body?.resultText === 'string' ? req.body.resultText
+    : (typeof req.body?.result === 'string' ? req.body.result : '');
+  if (!resultText.trim()) {
+    return res.status(400).json({ ok: false, error: 'bad_result', detail: 'resultText (không rỗng) là bắt buộc' });
+  }
+  const r = db.completeMuseTask(id, resultText.slice(0, 200000));
+  if (!r.ok && r.reason === 'not_found') return res.status(404).json({ ok: false, error: 'not_found' });
+  if (!r.ok && r.reason === 'already_done') return res.status(409).json({ ok: false, error: 'already_done', task: r.task });
+  res.json({ ok: true, ...r.task });
 });
 
 // ---------- API quản trị ----------
